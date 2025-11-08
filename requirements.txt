@@ -1,0 +1,6 @@
+Flask==3.1.2
+python-dotenv==1.0.0
+Werkzeug>=3.1.0
+
+# Install speedify-py directly from GitHub (master branch has latest code)
+git+https://github.com/speedify/speedify-py.git@master
