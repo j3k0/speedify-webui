@@ -65,15 +65,26 @@ def get_status():
         settings = speedify.show_settings()
         current_server = speedify.show_currentserver()
         
+        # Try to get public IP from multiple sources
+        public_ip = ''
+        
+        # Try settings first
+        if isinstance(settings, dict):
+            public_ip = settings.get('publicIp', '') or settings.get('publicIP', '') or settings.get('public_ip', '')
+        
+        # Try current_server if not found in settings
+        if not public_ip and isinstance(current_server, dict):
+            public_ip = current_server.get('publicIp', '') or current_server.get('publicIP', '') or current_server.get('ip', '')
+        
         # Build response
         status_data = {
             'state': state.name if hasattr(state, 'name') else str(state),
             'connected': state.name in ['CONNECTED', 'ENABLED'] if hasattr(state, 'name') else False,
-            'country': current_server.get('country', ''),
-            'city': current_server.get('city', ''),
-            'publicIp': settings.get('publicIp', ''),
-            'bondingMode': settings.get('bondingMode', ''),
-            'encrypted': settings.get('encrypted', False),
+            'country': current_server.get('country', '') if isinstance(current_server, dict) else '',
+            'city': current_server.get('city', '') if isinstance(current_server, dict) else '',
+            'publicIp': public_ip,
+            'bondingMode': settings.get('bondingMode', '') if isinstance(settings, dict) else '',
+            'encrypted': settings.get('encrypted', False) if isinstance(settings, dict) else False,
         }
         
         return jsonify({

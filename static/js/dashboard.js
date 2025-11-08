@@ -12,6 +12,10 @@ let refreshTimer = null;
 let isConnected = false;
 let availableServers = [];
 
+// Speed tracking state
+let previousStats = null;
+let previousTimestamp = null;
+
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', () => {
     console.log('🚀 Speedify Dashboard initialized');
@@ -149,6 +153,12 @@ async function loadStatus() {
             const ipElement = document.getElementById('publicIp');
             ipElement.textContent = state.publicIp || '-';
             
+            // Update bonding mode
+            const bondingModeElement = document.getElementById('bondingMode');
+            if (bondingModeElement && state.bondingMode) {
+                bondingModeElement.textContent = state.bondingMode.charAt(0).toUpperCase() + state.bondingMode.slice(1);
+            }
+            
             // Update button states
             updateButtonStates();
         }
@@ -175,7 +185,12 @@ async function loadAdapters() {
                 return;
             }
             
-            tbody.innerHTML = adapters.map(adapter => `
+            tbody.innerHTML = adapters.map(adapter => {
+                // Get data usage from the adapter's dataUsage object
+                const usageDaily = adapter.dataUsage?.usageDaily || 0;
+                const usageMonthly = adapter.dataUsage?.usageMonthly || 0;
+                
+                return `
                 <tr class="border-b border-gray-700">
                     <td class="py-3">${adapter.name || adapter.adapterID || 'Unknown'}</td>
                     <td class="py-3">
@@ -187,16 +202,17 @@ async function loadAdapters() {
                         ${getAdapterStateHtml(adapter.state || adapter.adapterState)}
                     </td>
                     <td class="py-3">
-                        <span class="font-medium">${adapter.priority || adapter.priorityBonus || 0}</span>
+                        <span class="font-medium">${adapter.priority || adapter.priorityBonus || '-'}</span>
                     </td>
                     <td class="py-3">
                         <div class="text-sm">
-                            <div class="text-green-400">↓ ${formatBytes(adapter.bytesDown || 0)}</div>
-                            <div class="text-blue-400">↑ ${formatBytes(adapter.bytesUp || 0)}</div>
+                            <div class="text-gray-400">Daily: ${formatBytes(usageDaily)}</div>
+                            <div class="text-gray-500">Month: ${formatBytes(usageMonthly)}</div>
                         </div>
                     </td>
                 </tr>
-            `).join('');
+                `;
+            }).join('');
         }
     } catch (error) {
         console.error('Error loading adapters:', error);
@@ -299,18 +315,57 @@ async function loadStats() {
         
         if (result.success && result.data) {
             const stats = result.data;
+            const currentTimestamp = Date.now();
             
-            // Note: Speedify CLI doesn't provide real-time speed through simple commands
-            // The stats() function requires callbacks/streaming which doesn't work well with REST
-            // So we show "N/A" for speeds and display cumulative data usage instead
+            // Calculate real-time speed based on difference from previous measurement
+            const downloadSpeedElement = document.getElementById('downloadSpeed');
             
-            document.getElementById('downloadSpeed').textContent = 'N/A';
-            document.getElementById('uploadSpeed').textContent = 'N/A';
+            if (downloadSpeedElement) {
+                if (previousStats && previousTimestamp) {
+                    // Calculate bytes difference
+                    const bytesDiff = (stats.totalMonthly || 0) - (previousStats.totalMonthly || 0);
+                    // Calculate time difference in seconds
+                    const timeDiff = (currentTimestamp - previousTimestamp) / 1000;
+                    
+                    if (timeDiff > 0 && bytesDiff >= 0) {
+                        // Calculate speed in bytes per second
+                        const bytesPerSecond = bytesDiff / timeDiff;
+                        // Convert to Mbps for display
+                        const mbps = (bytesPerSecond * 8) / (1024 * 1024);
+                        
+                        if (mbps > 0.01) {
+                            downloadSpeedElement.textContent = mbps.toFixed(2) + ' Mbps';
+                            downloadSpeedElement.className = 'text-2xl font-bold text-green-400';
+                        } else {
+                            downloadSpeedElement.textContent = '0.00 Mbps';
+                            downloadSpeedElement.className = 'text-2xl font-bold text-gray-400';
+                        }
+                    } else {
+                        downloadSpeedElement.textContent = 'Calculating...';
+                        downloadSpeedElement.className = 'text-2xl font-bold text-gray-500';
+                    }
+                } else {
+                    // First measurement - need at least two data points
+                    downloadSpeedElement.textContent = 'Calculating...';
+                    downloadSpeedElement.className = 'text-2xl font-bold text-gray-500';
+                }
+            }
+            
+            // Store current stats for next calculation
+            previousStats = stats;
+            previousTimestamp = currentTimestamp;
             
             // Update data usage (monthly total, split roughly in half for display)
             const totalUsage = stats.totalMonthly || 0;
-            document.getElementById('dataDownloaded').textContent = formatBytes(totalUsage / 2);
-            document.getElementById('dataUploaded').textContent = formatBytes(totalUsage / 2);
+            const dataDownloadedElement = document.getElementById('dataDownloaded');
+            const dataUploadedElement = document.getElementById('dataUploaded');
+            
+            if (dataDownloadedElement) {
+                dataDownloadedElement.textContent = formatBytes(totalUsage / 2);
+            }
+            if (dataUploadedElement) {
+                dataUploadedElement.textContent = formatBytes(totalUsage / 2);
+            }
         }
     } catch (error) {
         console.error('Error loading stats:', error);
