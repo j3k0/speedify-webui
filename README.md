@@ -9,6 +9,7 @@ A modern, web-based dashboard for monitoring and controlling Speedify connection
 - **Network Adapters**: View all network adapters and their status
 - **Server Selection**: Choose from available countries/servers
 - **Bypass Management**: Add and remove domain bypasses for streaming
+- **Port Bypass**: Configure specific ports to bypass Speedify VPN
 - **Auto-refresh**: Configurable auto-refresh interval (default: 3 seconds)
 - **Modern UI**: Responsive design with Tailwind CSS
 - **Network Security**: Restricted to LAN access (192.168.0.0/16)
@@ -131,6 +132,12 @@ let refreshInterval = 3000; // milliseconds
 - View and manage all active bypasses
 - Remove bypasses with one click
 
+### Port Bypasses
+- Configure specific ports to bypass the VPN (use direct connection)
+- Add ports individually with port validation (1-65535)
+- View all active port bypasses
+- Remove port bypasses with one click
+
 ## API Endpoints
 
 The dashboard exposes several REST API endpoints:
@@ -143,11 +150,14 @@ The dashboard exposes several REST API endpoints:
 | GET | `/api/servers` | Available servers |
 | GET | `/api/stats` | Connection statistics |
 | GET | `/api/bypasses` | Domain bypasses list |
+| GET | `/api/port-bypasses` | Port bypasses list |
 | POST | `/api/connect` | Connect to Speedify |
 | POST | `/api/disconnect` | Disconnect from Speedify |
 | POST | `/api/server` | Change server (requires `country` in JSON body) |
 | POST | `/api/bypasses` | Add bypass (requires `domain` in JSON body) |
+| POST | `/api/port-bypasses` | Add port bypass (requires `port` in JSON body) |
 | DELETE | `/api/bypasses/<domain>` | Remove bypass |
+| DELETE | `/api/port-bypasses/<port>` | Remove port bypass |
 
 ## Security
 

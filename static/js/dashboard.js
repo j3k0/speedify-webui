@@ -73,6 +73,16 @@ function setupEventListeners() {
             addBypass();
         }
     });
+    
+    // Add port bypass button
+    document.getElementById('addPortBypassBtn').addEventListener('click', addPortBypass);
+    
+    // Port bypass input - Enter key
+    document.getElementById('bypassPort').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            addPortBypass();
+        }
+    });
 }
 
 /**
@@ -107,6 +117,7 @@ async function loadAllData() {
         loadAdapters(),
         loadServers(),
         loadBypasses(),
+        loadPortBypasses(),
         loadStats()
     ]);
 }
@@ -302,6 +313,44 @@ async function loadBypasses() {
         }
     } catch (error) {
         console.error('Error loading bypasses:', error);
+    }
+}
+
+/**
+ * Load port bypasses
+ */
+async function loadPortBypasses() {
+    try {
+        const response = await fetch('/api/port-bypasses');
+        const result = await response.json();
+        
+        if (result.success) {
+            const ports = result.data || [];
+            const container = document.getElementById('portBypassesList');
+            
+            if (ports.length === 0) {
+                container.innerHTML = '<div class="text-gray-400 text-center py-4">No port bypasses configured</div>';
+                return;
+            }
+            
+            container.innerHTML = ports.map(portObj => {
+                // Handle both object format {port: 443, protocol: "tcp"} and simple port numbers
+                const portNum = typeof portObj === 'object' ? portObj.port : portObj;
+                const protocol = typeof portObj === 'object' && portObj.protocol ? ` (${portObj.protocol.toUpperCase()})` : '';
+                
+                return `
+                    <div class="flex items-center justify-between p-3 bg-gray-750 rounded-lg border border-gray-700">
+                        <span class="text-gray-200">Port ${portNum}${protocol}</span>
+                        <button onclick="removePortBypass('${portNum}')" 
+                                class="bg-red-600 hover:bg-red-700 text-white text-sm font-semibold py-1 px-3 rounded transition duration-200">
+                            Remove
+                        </button>
+                    </div>
+                `;
+            }).join('');
+        }
+    } catch (error) {
+        console.error('Error loading port bypasses:', error);
     }
 }
 
@@ -514,6 +563,73 @@ window.removeBypass = async function(domain) {
     } catch (error) {
         console.error('Error removing bypass:', error);
         showActionMessage('Error removing bypass', 'error');
+    }
+};
+
+/**
+ * Add port bypass
+ */
+async function addPortBypass() {
+    try {
+        const input = document.getElementById('bypassPort');
+        const port = input.value.trim();
+        
+        if (!port) {
+            showActionMessage('Please enter a port number', 'error');
+            return;
+        }
+        
+        const portNum = parseInt(port);
+        if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+            showActionMessage('Port must be between 1 and 65535', 'error');
+            return;
+        }
+        
+        showActionMessage(`Adding port bypass for port ${portNum}...`, 'info');
+        
+        const response = await fetch('/api/port-bypasses', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ port: portNum })
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            showActionMessage(`Port bypass added for port ${portNum}!`, 'success');
+            input.value = '';
+            await loadPortBypasses();
+        } else {
+            showActionMessage(`Failed to add port bypass: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error adding port bypass:', error);
+        showActionMessage('Error adding port bypass', 'error');
+    }
+}
+
+/**
+ * Remove port bypass (global function)
+ */
+window.removePortBypass = async function(port) {
+    try {
+        showActionMessage(`Removing port bypass for port ${port}...`, 'info');
+        
+        const response = await fetch(`/api/port-bypasses/${encodeURIComponent(port)}`, {
+            method: 'DELETE'
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            showActionMessage(`Port bypass removed for port ${port}!`, 'success');
+            await loadPortBypasses();
+        } else {
+            showActionMessage(`Failed to remove port bypass: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error removing port bypass:', error);
+        showActionMessage('Error removing port bypass', 'error');
     }
 };
 

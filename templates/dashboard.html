@@ -190,6 +190,40 @@
             </div>
         </section>
 
+        <!-- Port Bypass Management -->
+        <section class="mb-6">
+            <div class="bg-gray-800 rounded-lg shadow-lg p-6 border border-gray-700">
+                <h2 class="text-2xl font-semibold mb-4 text-blue-300">Port Bypasses</h2>
+                <p class="text-sm text-gray-400 mb-4">Traffic on these ports will bypass Speedify (use direct connection)</p>
+                
+                <!-- Add Port Bypass Form -->
+                <div class="mb-6 p-4 bg-gray-750 rounded-lg border border-gray-700">
+                    <h3 class="text-lg font-semibold mb-3 text-gray-300">Add New Port Bypass</h3>
+                    <div class="flex gap-2">
+                        <input type="number" 
+                               id="bypassPort" 
+                               placeholder="8080"
+                               min="1"
+                               max="65535"
+                               class="flex-1 bg-gray-700 border border-gray-600 text-white py-2 px-4 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <button id="addPortBypassBtn" 
+                                class="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-lg transition duration-200">
+                            Add Port Bypass
+                        </button>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">Enter a port number between 1 and 65535</p>
+                </div>
+                
+                <!-- Port Bypasses List -->
+                <div>
+                    <h3 class="text-lg font-semibold mb-3 text-gray-300">Active Port Bypasses</h3>
+                    <div id="portBypassesList" class="space-y-2">
+                        <div class="text-gray-400 text-center py-4">Loading port bypasses...</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- Footer -->
         <footer class="text-center text-gray-500 text-sm mt-8">
             <p>Speedify Web Dashboard | Restricted to 192.168.0.0/16</p>

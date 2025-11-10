@@ -268,6 +268,103 @@ def remove_bypass(domain):
         }), 500
 
 
+@app.route('/api/port-bypasses')
+def get_port_bypasses():
+    """Get list of port bypasses"""
+    try:
+        # Get streaming bypass list which includes ports
+        bypass_data = speedify.show_streamingbypass()
+        
+        return jsonify({
+            'success': True,
+            'data': bypass_data.get('ports', []) if isinstance(bypass_data, dict) else []
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
+@app.route('/api/port-bypasses', methods=['POST'])
+def add_port_bypass():
+    """Add a port bypass rule"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'port' not in data:
+            return jsonify({
+                'success': False,
+                'error': 'Port is required'
+            }), 400
+        
+        port = data['port']
+        
+        # Validate port number
+        try:
+            port_num = int(port)
+            if port_num < 1 or port_num > 65535:
+                return jsonify({
+                    'success': False,
+                    'error': 'Port must be between 1 and 65535'
+                }), 400
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'error': 'Port must be a valid number'
+            }), 400
+        
+        # Add to streaming bypass ports
+        result = speedify.streamingbypass_ports_add(str(port_num))
+        
+        return jsonify({
+            'success': True,
+            'message': f'Added port bypass for {port_num}',
+            'data': result
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
+@app.route('/api/port-bypasses/<port>', methods=['DELETE'])
+def remove_port_bypass(port):
+    """Remove a port bypass rule"""
+    try:
+        # Validate port number
+        try:
+            port_num = int(port)
+            if port_num < 1 or port_num > 65535:
+                return jsonify({
+                    'success': False,
+                    'error': 'Port must be between 1 and 65535'
+                }), 400
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'error': 'Port must be a valid number'
+            }), 400
+        
+        # Remove from streaming bypass ports
+        result = speedify.streamingbypass_ports_rem(str(port_num))
+        
+        return jsonify({
+            'success': True,
+            'message': f'Removed port bypass for {port_num}',
+            'data': result
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
 @app.route('/api/stats')
 def get_stats():
     """Get connection statistics (data usage)"""
