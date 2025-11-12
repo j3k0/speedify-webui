@@ -12,9 +12,8 @@ let refreshTimer = null;
 let isConnected = false;
 let availableServers = [];
 
-// Speed tracking state
-let previousStats = null;
-let previousTimestamp = null;
+// Speed tracking state - no longer needed, keeping for compatibility
+// Bandwidth is now calculated server-side from Speedify's real-time stats
 
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', () => {
@@ -28,6 +27,21 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Start auto-refresh
     startAutoRefresh();
+    
+    // Handle page visibility to pause updates when tab is hidden
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            console.log('🔕 Tab hidden - pausing auto-refresh');
+            stopAutoRefresh();
+        } else {
+            console.log('🔔 Tab visible - resuming auto-refresh');
+            // Refresh data immediately when tab becomes visible
+            loadAllData();
+            if (autoRefresh) {
+                startAutoRefresh();
+            }
+        }
+    });
 });
 
 /**
@@ -364,45 +378,27 @@ async function loadStats() {
         
         if (result.success && result.data) {
             const stats = result.data;
-            const currentTimestamp = Date.now();
             
-            // Calculate real-time speed based on difference from previous measurement
+            // Display real-time bandwidth from Speedify's stats
             const downloadSpeedElement = document.getElementById('downloadSpeed');
             
             if (downloadSpeedElement) {
-                if (previousStats && previousTimestamp) {
-                    // Calculate bytes difference
-                    const bytesDiff = (stats.totalMonthly || 0) - (previousStats.totalMonthly || 0);
-                    // Calculate time difference in seconds
-                    const timeDiff = (currentTimestamp - previousTimestamp) / 1000;
-                    
-                    if (timeDiff > 0 && bytesDiff >= 0) {
-                        // Calculate speed in bytes per second
-                        const bytesPerSecond = bytesDiff / timeDiff;
-                        // Convert to Mbps for display
-                        const mbps = (bytesPerSecond * 8) / (1024 * 1024);
-                        
-                        if (mbps > 0.01) {
-                            downloadSpeedElement.textContent = mbps.toFixed(2) + ' Mbps';
-                            downloadSpeedElement.className = 'text-2xl font-bold text-green-400';
-                        } else {
-                            downloadSpeedElement.textContent = '0.00 Mbps';
-                            downloadSpeedElement.className = 'text-2xl font-bold text-gray-400';
-                        }
-                    } else {
-                        downloadSpeedElement.textContent = 'Calculating...';
-                        downloadSpeedElement.className = 'text-2xl font-bold text-gray-500';
-                    }
+                // Get download speed in bytes per second from backend
+                const downloadBps = stats.downloadBps || 0;
+                const uploadBps = stats.uploadBps || 0;
+                
+                // Calculate total throughput in Mbps
+                const totalBps = downloadBps + uploadBps;
+                const mbps = (totalBps * 8) / (1024 * 1024);
+                
+                if (mbps > 0.01) {
+                    downloadSpeedElement.textContent = mbps.toFixed(2) + ' Mbps';
+                    downloadSpeedElement.className = 'text-2xl font-bold text-green-400';
                 } else {
-                    // First measurement - need at least two data points
-                    downloadSpeedElement.textContent = 'Calculating...';
-                    downloadSpeedElement.className = 'text-2xl font-bold text-gray-500';
+                    downloadSpeedElement.textContent = '0.00 Mbps';
+                    downloadSpeedElement.className = 'text-2xl font-bold text-gray-400';
                 }
             }
-            
-            // Store current stats for next calculation
-            previousStats = stats;
-            previousTimestamp = currentTimestamp;
             
             // Update data usage (monthly total, split roughly in half for display)
             const totalUsage = stats.totalMonthly || 0;

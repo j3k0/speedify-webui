@@ -367,10 +367,20 @@ def remove_port_bypass(port):
 
 @app.route('/api/stats')
 def get_stats():
-    """Get connection statistics (data usage)"""
+    """Get connection statistics (data usage and real-time bandwidth)"""
     try:
-        # Get adapter information which includes data usage
-        adapters = speedify.show_adapters()
+        # Get comprehensive stats including real-time bandwidth
+        all_stats = speedify.stats()
+        
+        # Extract adapter data and connection stats
+        adapters = []
+        connection_stats = None
+        
+        for stat_entry in all_stats:
+            if stat_entry[0] == 'adapters':
+                adapters = stat_entry[1]
+            elif stat_entry[0] == 'connection_stats':
+                connection_stats = stat_entry[1]
         
         # Calculate total usage from all adapters
         total_monthly = 0
@@ -381,9 +391,22 @@ def get_stats():
                 total_monthly += adapter['dataUsage'].get('usageMonthly', 0)
                 total_daily += adapter['dataUsage'].get('usageDaily', 0)
         
+        # Calculate real-time bandwidth from connection stats
+        download_bps = 0
+        upload_bps = 0
+        
+        if connection_stats and 'connections' in connection_stats:
+            for conn in connection_stats['connections']:
+                # Skip proxy connections as they don't represent real bandwidth
+                if conn.get('protocol') != 'proxy':
+                    download_bps += conn.get('receiveBps', 0)
+                    upload_bps += conn.get('sendBps', 0)
+        
         stats_data = {
             'totalMonthly': total_monthly,
             'totalDaily': total_daily,
+            'downloadBps': download_bps,
+            'uploadBps': upload_bps,
             'adapters': adapters
         }
         
