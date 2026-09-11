@@ -382,29 +382,27 @@ def get_stats():
             elif stat_entry[0] == 'connection_stats':
                 connection_stats = stat_entry[1]
         
-        # Calculate total usage from all adapters
-        total_monthly = 0
-        total_daily = 0
-        
-        for adapter in adapters:
-            if 'dataUsage' in adapter:
-                total_monthly += adapter['dataUsage'].get('usageMonthly', 0)
-                total_daily += adapter['dataUsage'].get('usageDaily', 0)
-        
+        # Real monthly usage from session stats (auto-reset by Speedify
+        # at periodStartTime). Adapter usageMonthly is per-adapter billed
+        # bytes with overlap on bonded traffic — not usable as totals.
+        month = speedify._run_speedify_cmd(['stats', 'session', 'month'])['month']
+        month_down = month.get('bytesReceived', 0)
+        month_up = month.get('bytesSent', 0)
+
         # Calculate real-time bandwidth from connection stats
         download_bps = 0
         upload_bps = 0
-        
+
         if connection_stats and 'connections' in connection_stats:
             for conn in connection_stats['connections']:
                 # Skip proxy connections as they don't represent real bandwidth
                 if conn.get('protocol') != 'proxy':
                     download_bps += conn.get('receiveBps', 0)
                     upload_bps += conn.get('sendBps', 0)
-        
+
         stats_data = {
-            'totalMonthly': total_monthly,
-            'totalDaily': total_daily,
+            'monthDownloaded': month_down,
+            'monthUploaded': month_up,
             'downloadBps': download_bps,
             'uploadBps': upload_bps,
             'adapters': adapters

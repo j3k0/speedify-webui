@@ -400,16 +400,15 @@ async function loadStats() {
                 }
             }
             
-            // Update data usage (monthly total, split roughly in half for display)
-            const totalUsage = stats.totalMonthly || 0;
+            // Update monthly data usage (real session stats, not adapter sums)
             const dataDownloadedElement = document.getElementById('dataDownloaded');
             const dataUploadedElement = document.getElementById('dataUploaded');
-            
+
             if (dataDownloadedElement) {
-                dataDownloadedElement.textContent = formatBytes(totalUsage / 2);
+                dataDownloadedElement.textContent = formatBytes(stats.monthDownloaded || 0);
             }
             if (dataUploadedElement) {
-                dataUploadedElement.textContent = formatBytes(totalUsage / 2);
+                dataUploadedElement.textContent = formatBytes(stats.monthUploaded || 0);
             }
         }
     } catch (error) {

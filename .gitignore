@@ -27,3 +27,6 @@ Thumbs.db
 # Project specific
 *.pid
 
+
+# Local agent notes
+AGENTS.md
