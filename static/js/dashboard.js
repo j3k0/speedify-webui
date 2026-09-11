@@ -398,6 +398,13 @@ async function loadStats() {
                     downloadSpeedElement.textContent = '0.00 Mbps';
                     downloadSpeedElement.className = 'text-2xl font-bold text-gray-400';
                 }
+                // Per-direction breakdown using the same unit as the combined value
+                const speedBreakdownElement = document.getElementById('speedBreakdown');
+                if (speedBreakdownElement) {
+                    const downMbps = (downloadBps * 8) / (1024 * 1024);
+                    const upMbps = (uploadBps * 8) / (1024 * 1024);
+                    speedBreakdownElement.textContent = downMbps.toFixed(1) + ' in / ' + upMbps.toFixed(1) + ' out';
+                }
             }
             
             // Update monthly data usage (real session stats, not adapter sums)
