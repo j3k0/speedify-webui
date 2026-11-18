@@ -389,22 +389,42 @@ def get_stats():
         month_down = month.get('bytesReceived', 0)
         month_up = month.get('bytesSent', 0)
 
-        # Calculate real-time bandwidth from connection stats
+        # Peak speeds seen this period (session stats)
+        max_down_mbps = month.get('maxDownloadSpeed', 0)
+        max_up_mbps = month.get('maxUploadSpeed', 0)
+
+        # Calculate real-time bandwidth + per-connection quality from
+        # connection stats
         download_bps = 0
         upload_bps = 0
+        connections = []
 
         if connection_stats and 'connections' in connection_stats:
             for conn in connection_stats['connections']:
                 # Skip proxy connections as they don't represent real bandwidth
-                if conn.get('protocol') != 'proxy':
-                    download_bps += conn.get('receiveBps', 0)
-                    upload_bps += conn.get('sendBps', 0)
+                if conn.get('protocol') == 'proxy':
+                    continue
+                download_bps += conn.get('receiveBps', 0)
+                upload_bps += conn.get('sendBps', 0)
+                connections.append({
+                    'adapterID': conn.get('adapterID'),
+                    'latencyMs': conn.get('latencyMs'),
+                    'jitterMs': conn.get('jitterMs'),
+                    'lossReceive': conn.get('lossReceive', 0),
+                    'lossSend': conn.get('lossSend', 0),
+                    'mos': conn.get('mos'),
+                    'receiveEstimateMbps': conn.get('receiveEstimateMbps'),
+                    'sendEstimateMbps': conn.get('sendEstimateMbps'),
+                })
 
         stats_data = {
             'monthDownloaded': month_down,
             'monthUploaded': month_up,
+            'maxDownloadMbps': max_down_mbps,
+            'maxUploadMbps': max_up_mbps,
             'downloadBps': download_bps,
             'uploadBps': upload_bps,
+            'connections': connections,
             'adapters': adapters
         }
         

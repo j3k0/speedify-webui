@@ -11,6 +11,9 @@ let refreshTimer = null;
 // State
 let isConnected = false;
 let availableServers = [];
+let speedHistory = [];            // last N total-throughput samples (Mbps)
+let connectionMap = {};           // adapterID -> per-connection quality stats
+let messageTimer = null;
 
 // Speed tracking state - no longer needed, keeping for compatibility
 // Bandwidth is now calculated server-side from Speedify's real-time stats
@@ -97,6 +100,25 @@ function setupEventListeners() {
             addPortBypass();
         }
     });
+    
+    // Copy public IP
+    document.getElementById('copyIpBtn').addEventListener('click', async () => {
+        const ip = document.getElementById('publicIp').textContent.trim();
+        if (!ip || ip === '—') return;
+        try {
+            await navigator.clipboard.writeText(ip);
+            const btn = document.getElementById('copyIpBtn');
+            const original = btn.textContent;
+            btn.textContent = '✓';
+            btn.classList.add('text-green-400');
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.classList.remove('text-green-400');
+            }, 1500);
+        } catch (error) {
+            console.error('Failed to copy IP:', error);
+        }
+    });
 }
 
 /**
@@ -123,6 +145,16 @@ function stopAutoRefresh() {
 }
 
 /**
+ * Show when the data was last refreshed
+ */
+function updateLastUpdated() {
+    const el = document.getElementById('lastUpdated');
+    if (el) {
+        el.textContent = 'Updated ' + new Date().toLocaleTimeString();
+    }
+}
+
+/**
  * Load all dashboard data
  */
 async function loadAllData() {
@@ -134,6 +166,7 @@ async function loadAllData() {
         loadPortBypasses(),
         loadStats()
     ]);
+    updateLastUpdated();
 }
 
 /**
@@ -150,18 +183,30 @@ async function loadStatus() {
             // Update connection state - check both 'connected' field and state string
             isConnected = state.connected || state.state === 'CONNECTED' || state.state === 'ENABLED';
             
-            // Update status indicator
+            // Update status badge (pill + pulsing dot)
+            const badge = document.getElementById('statusBadge');
             const indicator = document.getElementById('statusIndicator');
             const statusText = document.getElementById('statusText');
             
+            const baseBadge = 'inline-flex items-center gap-2 px-3 py-1.5 rounded-full border font-semibold';
             if (isConnected) {
-                indicator.className = 'w-3 h-3 rounded-full bg-green-500';
+                badge.className = baseBadge + ' bg-green-500/10 border-green-500/30 text-green-400';
+                indicator.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
                 statusText.textContent = 'Connected';
-                statusText.className = 'text-lg font-medium text-green-400';
             } else {
-                indicator.className = 'w-3 h-3 rounded-full bg-red-500';
+                badge.className = baseBadge + ' bg-red-500/10 border-red-500/30 text-red-400';
+                indicator.className = 'w-2 h-2 rounded-full bg-red-500';
                 statusText.textContent = 'Disconnected';
-                statusText.className = 'text-lg font-medium text-red-400';
+            }
+            
+            // Encryption badge
+            const encryptionBadge = document.getElementById('encryptionBadge');
+            if (state.encrypted) {
+                encryptionBadge.classList.remove('hidden');
+                encryptionBadge.classList.add('inline-flex');
+            } else {
+                encryptionBadge.classList.add('hidden');
+                encryptionBadge.classList.remove('inline-flex');
             }
             
             // Update current server
@@ -171,12 +216,12 @@ async function loadStatus() {
             } else if (state.country) {
                 serverElement.textContent = state.country.toUpperCase();
             } else {
-                serverElement.textContent = '-';
+                serverElement.textContent = '—';
             }
             
             // Update public IP
             const ipElement = document.getElementById('publicIp');
-            ipElement.textContent = state.publicIp || '-';
+            ipElement.textContent = state.publicIp || '—';
             
             // Update bonding mode
             const bondingModeElement = document.getElementById('bondingMode');
@@ -206,41 +251,66 @@ async function loadAdapters() {
             const tbody = document.getElementById('adaptersTable');
             
             if (!adapters || adapters.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="py-4 text-gray-400 text-center">No adapters found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="py-4 text-gray-500 text-center">No adapters found</td></tr>';
                 return;
             }
             
             tbody.innerHTML = adapters.map(adapter => {
-                // Get data usage from the adapter's dataUsage object
-                const usageDaily = adapter.dataUsage?.usageDaily || 0;
-                const usageMonthly = adapter.dataUsage?.usageMonthly || 0;
-                
-                return `
-                <tr class="border-b border-gray-700">
-                    <td class="py-3">${adapter.name || adapter.adapterID || 'Unknown'}</td>
-                    <td class="py-3">
-                        <span class="px-2 py-1 bg-gray-700 rounded text-sm">
-                            ${adapter.type || adapter.connectionType || 'Unknown'}
-                        </span>
-                    </td>
-                    <td class="py-3">
-                        ${getAdapterStateHtml(adapter.state || adapter.adapterState)}
-                    </td>
-                    <td class="py-3">
-                        <span class="font-medium">${adapter.priority || adapter.priorityBonus || '-'}</span>
-                    </td>
-                    <td class="py-3">
-                        <div class="text-sm">
-                            <div class="text-gray-400">Daily: ${formatBytes(usageDaily)}</div>
-                            <div class="text-gray-500">Month: ${formatBytes(usageMonthly)}</div>
-                        </div>
-                    </td>
-                </tr>
-                `;
-            }).join('');
+        // Get data usage from the adapter's dataUsage object
+        const usageDaily = adapter.dataUsage?.usageDaily || 0;
+        const usageMonthly = adapter.dataUsage?.usageMonthly || 0;
+        const adapterId = adapter.name || adapter.adapterID || 'Unknown';
+        
+        return `
+        <tr class="border-b border-gray-700">
+            <td class="py-3 font-mono text-sm">${escapeHtml(adapterId)}</td>
+            <td class="py-3">
+                <span class="px-2 py-1 bg-gray-700 rounded text-sm">
+                    ${escapeHtml(adapter.type || adapter.connectionType || 'Unknown')}
+                </span>
+            </td>
+            <td class="py-3">
+                ${getAdapterStateHtml(adapter.state || adapter.adapterState)}
+            </td>
+            <td class="py-3">
+                <span class="font-medium">${adapter.priority || adapter.priorityBonus || '-'}</span>
+            </td>
+            <td class="py-3 text-sm text-gray-300 tabular-nums" id="lat-${escapeHtml(adapterId)}">—</td>
+            <td class="py-3">
+                <div class="text-sm tabular-nums">
+                    <div class="text-gray-400">Daily: ${formatBytes(usageDaily)}</div>
+                    <div class="text-gray-500">Month: ${formatBytes(usageMonthly)}</div>
+                </div>
+            </td>
+        </tr>
+        `;
+        }).join('');
+        
+        // Fill in latency/loss from the (possibly already loaded) connection stats
+        updateAdapterLatency();
         }
     } catch (error) {
         console.error('Error loading adapters:', error);
+    }
+}
+
+/**
+ * Update the Latency column of the adapters table from connection stats
+ */
+function updateAdapterLatency() {
+    for (const [adapterId, conn] of Object.entries(connectionMap)) {
+        const cell = document.getElementById('lat-' + adapterId);
+        if (!cell) continue;
+        
+        let text = '—';
+        if (conn.latencyMs != null) {
+            const loss = (conn.lossReceive || 0) * 100;
+            text = `${Math.round(conn.latencyMs)} ms`;
+            if (loss > 0) {
+                text += ` · ${loss < 0.1 ? loss.toFixed(2) : loss.toFixed(1)}% loss`;
+            }
+        }
+        cell.textContent = text;
     }
 }
 
@@ -249,14 +319,16 @@ async function loadAdapters() {
  */
 function getAdapterStateHtml(state) {
     const stateMap = {
-        'connected': '<span class="px-2 py-1 bg-green-600 rounded text-sm">Connected</span>',
-        'disconnected': '<span class="px-2 py-1 bg-red-600 rounded text-sm">Disconnected</span>',
-        'connecting': '<span class="px-2 py-1 bg-yellow-600 rounded text-sm">Connecting</span>',
-        'enabled': '<span class="px-2 py-1 bg-green-600 rounded text-sm">Enabled</span>',
-        'disabled': '<span class="px-2 py-1 bg-gray-600 rounded text-sm">Disabled</span>'
+        'connected': 'pill-green',
+        'disconnected': 'pill-red',
+        'connecting': 'pill-yellow',
+        'enabled': 'pill-green',
+        'disabled': 'pill-gray'
     };
     
-    return stateMap[state] || `<span class="px-2 py-1 bg-gray-600 rounded text-sm">${state || 'Unknown'}</span>`;
+    const cls = stateMap[state] || 'pill-gray';
+    const label = state ? (state.charAt(0).toUpperCase() + state.slice(1)) : 'Unknown';
+    return `<span class="pill ${cls}">${escapeHtml(label)}</span>`;
 }
 
 /**
@@ -309,20 +381,20 @@ async function loadBypasses() {
         if (result.success) {
             const bypasses = result.data.domains || result.data || [];
             const container = document.getElementById('bypassesList');
+            const count = document.getElementById('bypassCount');
+            if (count) count.textContent = bypasses.length ? `${bypasses.length}` : '';
             
             if (bypasses.length === 0) {
-                container.innerHTML = '<div class="text-gray-400 text-center py-4">No bypasses configured</div>';
+                container.innerHTML = '<span class="text-gray-500 text-sm">No bypasses configured</span>';
                 return;
             }
             
             container.innerHTML = bypasses.map(domain => `
-                <div class="flex items-center justify-between p-3 bg-gray-750 rounded-lg border border-gray-700">
-                    <span class="text-gray-200">${domain}</span>
-                    <button onclick="removeBypass('${domain}')" 
-                            class="bg-red-600 hover:bg-red-700 text-white text-sm font-semibold py-1 px-3 rounded transition duration-200">
-                        Remove
-                    </button>
-                </div>
+                <span class="chip">
+                    ${escapeHtml(domain)}
+                    <button onclick="removeBypass('${escapeHtml(domain)}')" title="Remove ${escapeHtml(domain)}"
+                            class="chip-x">✕</button>
+                </span>
             `).join('');
         }
     } catch (error) {
@@ -341,25 +413,25 @@ async function loadPortBypasses() {
         if (result.success) {
             const ports = result.data || [];
             const container = document.getElementById('portBypassesList');
+            const count = document.getElementById('portBypassCount');
+            if (count) count.textContent = ports.length ? `${ports.length}` : '';
             
             if (ports.length === 0) {
-                container.innerHTML = '<div class="text-gray-400 text-center py-4">No port bypasses configured</div>';
+                container.innerHTML = '<span class="text-gray-500 text-sm">No port bypasses configured</span>';
                 return;
             }
             
             container.innerHTML = ports.map(portObj => {
                 // Handle both object format {port: 443, protocol: "tcp"} and simple port numbers
                 const portNum = typeof portObj === 'object' ? portObj.port : portObj;
-                const protocol = typeof portObj === 'object' && portObj.protocol ? ` (${portObj.protocol.toUpperCase()})` : '';
+                const protocol = typeof portObj === 'object' && portObj.protocol ? ` <span class="opacity-60">${escapeHtml(String(portObj.protocol).toUpperCase())}</span>` : '';
                 
                 return `
-                    <div class="flex items-center justify-between p-3 bg-gray-750 rounded-lg border border-gray-700">
-                        <span class="text-gray-200">Port ${portNum}${protocol}</span>
-                        <button onclick="removePortBypass('${portNum}')" 
-                                class="bg-red-600 hover:bg-red-700 text-white text-sm font-semibold py-1 px-3 rounded transition duration-200">
-                            Remove
-                        </button>
-                    </div>
+                    <span class="chip chip-mono">
+                        ${portNum}${protocol}
+                        <button onclick="removePortBypass('${escapeHtml(String(portNum))}')" title="Remove port ${portNum}"
+                                class="chip-x">✕</button>
+                    </span>
                 `;
             }).join('');
         }
@@ -393,23 +465,27 @@ async function loadStats() {
                 
                 if (mbps > 0.01) {
                     downloadSpeedElement.textContent = mbps.toFixed(2) + ' Mbps';
-                    downloadSpeedElement.className = 'text-2xl font-bold text-green-400';
+                    downloadSpeedElement.className = 'text-3xl font-bold tabular-nums text-green-400 mt-2';
                 } else {
                     downloadSpeedElement.textContent = '0.00 Mbps';
-                    downloadSpeedElement.className = 'text-2xl font-bold text-gray-400';
+                    downloadSpeedElement.className = 'text-3xl font-bold tabular-nums text-gray-400 mt-2';
                 }
+                pushSpeedSample(mbps);
+                
                 // Per-direction breakdown using the same unit as the combined value
                 const speedBreakdownElement = document.getElementById('speedBreakdown');
                 if (speedBreakdownElement) {
                     const downMbps = (downloadBps * 8) / (1024 * 1024);
                     const upMbps = (uploadBps * 8) / (1024 * 1024);
-                    speedBreakdownElement.textContent = downMbps.toFixed(1) + ' in / ' + upMbps.toFixed(1) + ' out';
+                    speedBreakdownElement.textContent = '↓ ' + downMbps.toFixed(1) + ' Mbps · ↑ ' + upMbps.toFixed(1) + ' Mbps';
                 }
             }
             
             // Update monthly data usage (real session stats, not adapter sums)
             const dataDownloadedElement = document.getElementById('dataDownloaded');
             const dataUploadedElement = document.getElementById('dataUploaded');
+            const dataDownloadedSub = document.getElementById('dataDownloadedSub');
+            const dataUploadedSub = document.getElementById('dataUploadedSub');
 
             if (dataDownloadedElement) {
                 dataDownloadedElement.textContent = formatBytes(stats.monthDownloaded || 0);
@@ -417,6 +493,21 @@ async function loadStats() {
             if (dataUploadedElement) {
                 dataUploadedElement.textContent = formatBytes(stats.monthUploaded || 0);
             }
+            if (dataDownloadedSub && stats.maxDownloadMbps) {
+                dataDownloadedSub.textContent = 'Last 30 days · peak ' + Number(stats.maxDownloadMbps).toFixed(1) + ' Mbps';
+            }
+            if (dataUploadedSub && stats.maxUploadMbps) {
+                dataUploadedSub.textContent = 'Last 30 days · peak ' + Number(stats.maxUploadMbps).toFixed(1) + ' Mbps';
+            }
+            
+            // Cache per-connection quality stats for the adapters table
+            connectionMap = {};
+            for (const conn of stats.connections || []) {
+                if (conn.adapterID) {
+                    connectionMap[conn.adapterID] = conn;
+                }
+            }
+            updateAdapterLatency();
         }
     } catch (error) {
         console.error('Error loading stats:', error);
@@ -663,8 +754,10 @@ function showActionMessage(message, type = 'info') {
     content.textContent = message;
     container.classList.remove('hidden');
     
-    // Auto-hide after 5 seconds
-    setTimeout(() => {
+    // Auto-hide after 5 seconds (cancel any pending hide so a fresh
+    // message isn't dismissed by the previous one's timer)
+    if (messageTimer) clearTimeout(messageTimer);
+    messageTimer = setTimeout(() => {
         container.classList.add('hidden');
     }, 5000);
 }
@@ -690,5 +783,56 @@ function formatSpeed(speedMbps) {
         return (speedMbps * 1024).toFixed(2) + ' KB/s';
     }
     return speedMbps.toFixed(2) + ' MB/s';
+}
+
+/**
+ * Push a new throughput sample into the sparkline history
+ */
+function pushSpeedSample(mbps) {
+    speedHistory.push(mbps);
+    if (speedHistory.length > 40) {
+        speedHistory.shift();
+    }
+    renderSparkline();
+}
+
+/**
+ * Render the inline SVG sparkline of recent total throughput
+ */
+function renderSparkline() {
+    const svg = document.getElementById('speedSparkline');
+    if (!svg) return;
+    if (speedHistory.length < 2) {
+        svg.innerHTML = '';
+        return;
+    }
+    
+    const w = 100, h = 30;
+    const max = Math.max(...speedHistory, 1);
+    const points = speedHistory
+        .map((v, i) => {
+            const x = (i / (speedHistory.length - 1)) * w;
+            const y = h - (v / max) * (h - 4) - 2;
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+        })
+        .join(' ');
+    
+    svg.innerHTML =
+        `<polyline points="${points}" fill="none" stroke="#34d399" stroke-width="1.5"` +
+        ` vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"` +
+        ` opacity="0.85"/>`;
+}
+
+/**
+ * Escape a string for safe embedding in HTML
+ */
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    })[c]);
 }
 
