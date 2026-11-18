@@ -385,7 +385,8 @@ def get_stats():
         # Real monthly usage from session stats (auto-reset by Speedify
         # at periodStartTime). Adapter usageMonthly is per-adapter billed
         # bytes with overlap on bonded traffic — not usable as totals.
-        month = speedify._run_speedify_cmd(['stats', 'session', 'month'])['month']
+        month_cmd = speedify._run_speedify_cmd(['stats', 'session', 'month'])
+        month = month_cmd.get('month', {}) if isinstance(month_cmd, dict) else {}
         month_down = month.get('bytesReceived', 0)
         month_up = month.get('bytesSent', 0)
 
@@ -415,6 +416,7 @@ def get_stats():
                     'mos': conn.get('mos'),
                     'receiveEstimateMbps': conn.get('receiveEstimateMbps'),
                     'sendEstimateMbps': conn.get('sendEstimateMbps'),
+                    'totalBps': conn.get('totalBps', 0),
                 })
 
         stats_data = {

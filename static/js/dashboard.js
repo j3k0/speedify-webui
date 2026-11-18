@@ -62,10 +62,14 @@ function setupEventListeners() {
         }
     });
     
-    // Refresh interval change
+    // Refresh interval change (clamped to 1-60s)
     const intervalInput = document.getElementById('refreshInterval');
     intervalInput.addEventListener('change', (e) => {
-        refreshInterval = parseInt(e.target.value) * 1000;
+        let seconds = parseInt(e.target.value, 10);
+        if (isNaN(seconds) || seconds < 1) seconds = 3;
+        seconds = Math.min(60, seconds);
+        e.target.value = seconds;
+        refreshInterval = seconds * 1000;
         if (autoRefresh) {
             stopAutoRefresh();
             startAutoRefresh();
@@ -101,23 +105,62 @@ function setupEventListeners() {
         }
     });
     
-    // Copy public IP
+    // Copy public IP (with execCommand fallback — the page is plain HTTP,
+    // where navigator.clipboard may be undefined)
     document.getElementById('copyIpBtn').addEventListener('click', async () => {
         const ip = document.getElementById('publicIp').textContent.trim();
         if (!ip || ip === '—') return;
+        
+        const btn = document.getElementById('copyIpBtn');
+        const original = btn.textContent;
+        let ok = false;
+        
         try {
-            await navigator.clipboard.writeText(ip);
-            const btn = document.getElementById('copyIpBtn');
-            const original = btn.textContent;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(ip);
+                ok = true;
+            }
+        } catch (error) {
+            console.error('Clipboard API failed, trying fallback:', error);
+        }
+        
+        if (!ok) {
+            const ta = document.createElement('textarea');
+            ta.value = ip;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try {
+                ok = document.execCommand('copy');
+            } catch (error) {
+                console.error('execCommand copy failed:', error);
+            }
+            document.body.removeChild(ta);
+        }
+        
+        if (ok) {
             btn.textContent = '✓';
             btn.classList.add('text-green-400');
             setTimeout(() => {
                 btn.textContent = original;
                 btn.classList.remove('text-green-400');
             }, 1500);
-        } catch (error) {
-            console.error('Failed to copy IP:', error);
+        } else {
+            showActionMessage('Could not copy IP', 'error');
         }
+    });
+    
+    // Bypass chip removal (event delegation — avoids inline handlers with
+    // user-provided strings)
+    document.getElementById('bypassesList').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-domain]');
+        if (btn) removeBypass(btn.dataset.domain);
+    });
+    
+    document.getElementById('portBypassesList').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-port]');
+        if (btn) removePortBypass(btn.dataset.port);
     });
 }
 
@@ -145,12 +188,17 @@ function stopAutoRefresh() {
 }
 
 /**
- * Show when the data was last refreshed
+ * Show when the data was last refreshed (or that a refresh failed)
  */
-function updateLastUpdated() {
+function updateLastUpdated(ok) {
     const el = document.getElementById('lastUpdated');
-    if (el) {
+    if (!el) return;
+    if (ok) {
         el.textContent = 'Updated ' + new Date().toLocaleTimeString();
+        el.className = 'text-xs text-gray-500';
+    } else {
+        el.textContent = '⚠ Refresh failed — retrying…';
+        el.className = 'text-xs text-red-400';
     }
 }
 
@@ -158,7 +206,7 @@ function updateLastUpdated() {
  * Load all dashboard data
  */
 async function loadAllData() {
-    await Promise.all([
+    const [statusOk] = await Promise.all([
         loadStatus(),
         loadAdapters(),
         loadServers(),
@@ -166,7 +214,7 @@ async function loadAllData() {
         loadPortBypasses(),
         loadStats()
     ]);
-    updateLastUpdated();
+    updateLastUpdated(!!statusOk);
 }
 
 /**
@@ -231,10 +279,13 @@ async function loadStatus() {
             
             // Update button states
             updateButtonStates();
+            return true;
         }
+        return false;
     } catch (error) {
         console.error('Error loading status:', error);
         showActionMessage('Error loading status', 'error');
+        return false;
     }
 }
 
@@ -259,7 +310,7 @@ async function loadAdapters() {
         // Get data usage from the adapter's dataUsage object
         const usageDaily = adapter.dataUsage?.usageDaily || 0;
         const usageMonthly = adapter.dataUsage?.usageMonthly || 0;
-        const adapterId = adapter.name || adapter.adapterID || 'Unknown';
+        const adapterId = adapter.adapterID || adapter.name || 'Unknown';
         
         return `
         <tr class="border-b border-gray-700">
@@ -303,7 +354,7 @@ function updateAdapterLatency() {
         if (!cell) continue;
         
         let text = '—';
-        if (conn.latencyMs != null) {
+        if (conn.latencyMs > 0) {
             const loss = (conn.lossReceive || 0) * 100;
             text = `${Math.round(conn.latencyMs)} ms`;
             if (loss > 0) {
@@ -382,7 +433,7 @@ async function loadBypasses() {
             const bypasses = result.data.domains || result.data || [];
             const container = document.getElementById('bypassesList');
             const count = document.getElementById('bypassCount');
-            if (count) count.textContent = bypasses.length ? `${bypasses.length}` : '';
+            if (count) count.textContent = String(bypasses.length);
             
             if (bypasses.length === 0) {
                 container.innerHTML = '<span class="text-gray-500 text-sm">No bypasses configured</span>';
@@ -392,7 +443,7 @@ async function loadBypasses() {
             container.innerHTML = bypasses.map(domain => `
                 <span class="chip">
                     ${escapeHtml(domain)}
-                    <button onclick="removeBypass('${escapeHtml(domain)}')" title="Remove ${escapeHtml(domain)}"
+                    <button data-domain="${escapeHtml(domain)}" title="Remove ${escapeHtml(domain)}"
                             class="chip-x">✕</button>
                 </span>
             `).join('');
@@ -414,7 +465,7 @@ async function loadPortBypasses() {
             const ports = result.data || [];
             const container = document.getElementById('portBypassesList');
             const count = document.getElementById('portBypassCount');
-            if (count) count.textContent = ports.length ? `${ports.length}` : '';
+            if (count) count.textContent = String(ports.length);
             
             if (ports.length === 0) {
                 container.innerHTML = '<span class="text-gray-500 text-sm">No port bypasses configured</span>';
@@ -429,7 +480,7 @@ async function loadPortBypasses() {
                 return `
                     <span class="chip chip-mono">
                         ${portNum}${protocol}
-                        <button onclick="removePortBypass('${escapeHtml(String(portNum))}')" title="Remove port ${portNum}"
+                        <button data-port="${escapeHtml(String(portNum))}" title="Remove port ${portNum}"
                                 class="chip-x">✕</button>
                     </span>
                 `;
@@ -493,24 +544,32 @@ async function loadStats() {
             if (dataUploadedElement) {
                 dataUploadedElement.textContent = formatBytes(stats.monthUploaded || 0);
             }
-            if (dataDownloadedSub && stats.maxDownloadMbps) {
+            if (dataDownloadedSub && stats.maxDownloadMbps > 0) {
                 dataDownloadedSub.textContent = 'Last 30 days · peak ' + Number(stats.maxDownloadMbps).toFixed(1) + ' Mbps';
             }
-            if (dataUploadedSub && stats.maxUploadMbps) {
+            if (dataUploadedSub && stats.maxUploadMbps > 0) {
                 dataUploadedSub.textContent = 'Last 30 days · peak ' + Number(stats.maxUploadMbps).toFixed(1) + ' Mbps';
             }
             
-            // Cache per-connection quality stats for the adapters table
+            // Cache per-connection quality stats for the adapters table.
+            // Several connections can share an adapterID (virtual adapters);
+            // keep the busiest one so an idle backup line doesn't win.
             connectionMap = {};
             for (const conn of stats.connections || []) {
-                if (conn.adapterID) {
-                    connectionMap[conn.adapterID] = conn;
+                const id = conn.adapterID;
+                if (!id) continue;
+                const prev = connectionMap[id];
+                if (!prev || (conn.totalBps || 0) > (prev.totalBps || 0)) {
+                    connectionMap[id] = conn;
                 }
             }
             updateAdapterLatency();
         }
     } catch (error) {
         console.error('Error loading stats:', error);
+        // Flat-line the sparkline so a failed refresh is visible instead
+        // of the chart silently freezing on its last shape.
+        pushSpeedSample(0);
     }
 }
 
@@ -636,9 +695,9 @@ async function addBypass() {
 }
 
 /**
- * Remove bypass (global function)
+ * Remove bypass
  */
-window.removeBypass = async function(domain) {
+async function removeBypass(domain) {
     try {
         showActionMessage(`Removing bypass for ${domain}...`, 'info');
         
@@ -703,9 +762,9 @@ async function addPortBypass() {
 }
 
 /**
- * Remove port bypass (global function)
+ * Remove port bypass
  */
-window.removePortBypass = async function(port) {
+async function removePortBypass(port) {
     try {
         showActionMessage(`Removing port bypass for port ${port}...`, 'info');
         
@@ -773,16 +832,6 @@ function formatBytes(bytes) {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-/**
- * Format speed to human-readable format
- */
-function formatSpeed(speedMbps) {
-    if (speedMbps < 1) {
-        return (speedMbps * 1024).toFixed(2) + ' KB/s';
-    }
-    return speedMbps.toFixed(2) + ' MB/s';
 }
 
 /**
