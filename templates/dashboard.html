@@ -116,8 +116,13 @@
                         <span class="text-base opacity-70" aria-hidden="true">⚡</span>
                     </div>
                     <div class="text-3xl font-bold tabular-nums text-gray-500 mt-2" id="downloadSpeed">—</div>
-                    <svg id="speedSparkline" class="w-full h-9 mt-2" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                    <svg id="speedSparkline" class="w-full h-12 mt-2" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                    <div class="flex justify-between text-[10px] text-gray-600 tabular-nums">
+                        <span id="speedPeakLbl">peak —</span>
+                        <span id="speedWindowLbl">last 2m</span>
+                    </div>
                     <div class="text-xs text-gray-500 mt-1 tabular-nums" id="speedBreakdown">—</div>
+                    <svg id="uploadSparkline" class="w-full h-6 mt-1.5" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
                 </div>
 
                 <!-- Connection Mode -->
@@ -137,6 +142,7 @@
                     </div>
                     <div class="text-3xl font-bold text-purple-400 mt-2 tabular-nums" id="dataDownloaded">0 B</div>
                     <div class="text-xs text-gray-500 mt-1 tabular-nums" id="dataDownloadedSub">Last 30 days</div>
+                    <svg id="dlPeakSparkline" class="w-full h-5 mt-2.5" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
                 </div>
 
                 <!-- Data Uploaded (Monthly) -->
@@ -147,6 +153,7 @@
                     </div>
                     <div class="text-3xl font-bold text-yellow-400 mt-2 tabular-nums" id="dataUploaded">0 B</div>
                     <div class="text-xs text-gray-500 mt-1 tabular-nums" id="dataUploadedSub">Last 30 days</div>
+                    <svg id="upPeakSparkline" class="w-full h-5 mt-2.5" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
                 </div>
             </div>
         </section>
@@ -163,13 +170,14 @@
                                 <th class="pb-3 text-gray-400 font-medium">Type</th>
                                 <th class="pb-3 text-gray-400 font-medium">State</th>
                                 <th class="pb-3 text-gray-400 font-medium">Priority</th>
-                                <th class="pb-3 text-gray-400 font-medium">Latency</th>
+                                <th class="pb-3 text-gray-400 font-medium">Latency · Loss</th>
+                                <th class="pb-3 text-gray-400 font-medium">Throughput</th>
                                 <th class="pb-3 text-gray-400 font-medium">Usage</th>
                             </tr>
                         </thead>
                         <tbody id="adaptersTable">
                             <tr>
-                                <td colspan="6" class="py-4 text-gray-500 text-center">Loading adapters…</td>
+                                <td colspan="7" class="py-4 text-gray-500 text-center">Loading adapters…</td>
                             </tr>
                         </tbody>
                     </table>

@@ -12,6 +12,7 @@ let refreshTimer = null;
 let isConnected = false;
 let availableServers = [];
 let speedHistory = [];            // last N total-throughput samples (Mbps)
+let uploadHistory = [];           // last N upload samples (Mbps)
 let connectionMap = {};           // adapterID -> per-connection quality stats
 let messageTimer = null;
 
@@ -302,7 +303,7 @@ async function loadAdapters() {
             const tbody = document.getElementById('adaptersTable');
             
             if (!adapters || adapters.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="py-4 text-gray-500 text-center">No adapters found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" class="py-4 text-gray-500 text-center">No adapters found</td></tr>';
                 return;
             }
             
@@ -327,6 +328,12 @@ async function loadAdapters() {
                 <span class="font-medium">${adapter.priority || adapter.priorityBonus || '-'}</span>
             </td>
             <td class="py-3 text-sm text-gray-300 tabular-nums" id="lat-${escapeHtml(adapterId)}">—</td>
+            <td class="py-3" id="thr-${escapeHtml(adapterId)}">
+                <div class="flex items-center gap-2">
+                    <div class="flex-1 min-w-[70px]">${barHtml(0, 0, 'bg-gray-600')}</div>
+                    <span class="text-sm tabular-nums text-gray-500">idle</span>
+                </div>
+            </td>
             <td class="py-3">
                 <div class="text-sm tabular-nums">
                     <div class="text-gray-400">Daily: ${formatBytes(usageDaily)}</div>
@@ -346,23 +353,75 @@ async function loadAdapters() {
 }
 
 /**
- * Update the Latency column of the adapters table from connection stats
+ * Update the Latency and Throughput columns of the adapters table from
+ * the merged connection stats. Latency gets a quality colour (green/
+ * amber/red) and shows receive packet loss; throughput gets an animated
+ * bar (busy = green, low = amber, idle = gray) sized against the busiest
+ * connection, plus ↓/↑ estimate Mbps when Speedify reports them.
  */
 function updateAdapterLatency() {
+    let maxTotalBps = 0;
+    for (const conn of Object.values(connectionMap)) {
+        maxTotalBps = Math.max(maxTotalBps, conn.totalBps || 0);
+    }
+
     for (const [adapterId, conn] of Object.entries(connectionMap)) {
-        const cell = document.getElementById('lat-' + adapterId);
-        if (!cell) continue;
-        
-        let text = '—';
+        const latCell = document.getElementById('lat-' + adapterId);
+        const thrCell = document.getElementById('thr-' + adapterId);
+        if (!latCell || !thrCell) continue;
+
+        // --- Latency / loss ---
+        let latHtml = '<span class="text-gray-500">—</span>';
         if (conn.latencyMs > 0) {
+            const latency = Math.round(conn.latencyMs);
             const loss = (conn.lossReceive || 0) * 100;
-            text = `${Math.round(conn.latencyMs)} ms`;
+            const jitter = conn.jitterMs && conn.jitterMs > 0
+                ? ` <span class="text-gray-500">±${Math.round(conn.jitterMs)}</span>` : '';
+            const color = latency < 80 ? 'text-green-400'
+                       : latency < 200 ? 'text-yellow-400' : 'text-red-400';
+            const lossFmt = loss < 0.1 ? loss.toFixed(2) : loss.toFixed(1);
+            latHtml = `<span class="${color} font-medium">${latency} ms${jitter}</span>`;
             if (loss > 0) {
-                text += ` · ${loss < 0.1 ? loss.toFixed(2) : loss.toFixed(1)}% loss`;
+                latHtml += ` <span class="text-gray-500">· ${lossFmt}% ↓loss</span>`;
             }
         }
-        cell.textContent = text;
+        latCell.innerHTML = latHtml;
+
+        // --- Throughput bar ---
+        const totalBps = conn.totalBps || 0;
+        const frac = maxTotalBps > 0 ? totalBps / maxTotalBps : 0;
+        const cls = totalBps === 0 ? 'bg-gray-600'
+                  : frac < 0.35 ? 'bg-yellow-500' : 'bg-green-500';
+        thrCell.innerHTML =
+            `<div class="flex items-center gap-2">
+                <div class="flex-1 min-w-[70px]">${barHtml(totalBps, maxTotalBps, cls)}</div>
+                <span class="thr-val text-sm tabular-nums ${totalBps === 0 ? 'text-gray-500' : 'text-gray-200'}">${formatMbps(totalBps)}</span>
+            </div>`;
+
+        const down = conn.receiveEstimateMbps;
+        const up = conn.sendEstimateMbps;
+        if ((down && down > 0) || (up && up > 0)) {
+            const note = `↓ ${Number(down || 0).toFixed(1)} · ↑ ${Number(up || 0).toFixed(1)} Mbps`; 
+            let val = thrCell.querySelector('.thr-val');
+            val.insertAdjacentHTML('beforeend',
+                `<div class="thr-note text-[10px] text-gray-500 tabular-nums">${note}</div>`);
+        }
     }
+}
+
+/**
+ * Build a small progress bar (width 0-100% vs the busiest line)
+ */
+function barHtml(value, max, colorClass) {
+    const pct = max > 0 ? Math.max(4, Math.round((value / max) * 100)) : 4;
+    return `<div class="thr-track"><div class="thr-fill ${colorClass}" style="width: ${pct}%"></div></div>`;
+}
+
+/**
+ * Convert bytes/second to a human-readable Mbps string
+ */
+function formatMbps(bps) {
+    return (((bps || 0) * 8) / 1000000).toFixed(1) + ' Mbps';
 }
 
 /**
@@ -509,6 +568,7 @@ async function loadStats() {
                 // Get download speed in bytes per second from backend
                 const downloadBps = stats.downloadBps || 0;
                 const uploadBps = stats.uploadBps || 0;
+                const upMbps = (uploadBps * 8) / (1024 * 1024);
                 
                 // Calculate total throughput in Mbps
                 const totalBps = downloadBps + uploadBps;
@@ -521,13 +581,12 @@ async function loadStats() {
                     downloadSpeedElement.textContent = '0.00 Mbps';
                     downloadSpeedElement.className = 'text-3xl font-bold tabular-nums text-gray-400 mt-2';
                 }
-                pushSpeedSample(mbps);
+                pushSpeedSample(mbps, upMbps, { dl: stats.maxDownloadMbps, up: stats.maxUploadMbps });
                 
                 // Per-direction breakdown using the same unit as the combined value
                 const speedBreakdownElement = document.getElementById('speedBreakdown');
                 if (speedBreakdownElement) {
                     const downMbps = (downloadBps * 8) / (1024 * 1024);
-                    const upMbps = (uploadBps * 8) / (1024 * 1024);
                     speedBreakdownElement.textContent = '↓ ' + downMbps.toFixed(1) + ' Mbps · ↑ ' + upMbps.toFixed(1) + ' Mbps';
                 }
             }
@@ -544,11 +603,24 @@ async function loadStats() {
             if (dataUploadedElement) {
                 dataUploadedElement.textContent = formatBytes(stats.monthUploaded || 0);
             }
-            if (dataDownloadedSub && stats.maxDownloadMbps > 0) {
-                dataDownloadedSub.textContent = 'Last 30 days · peak ' + Number(stats.maxDownloadMbps).toFixed(1) + ' Mbps';
+            if (dataDownloadedSub) {
+                dataDownloadedSub.textContent = 'Last 30 days · peak ' +
+                    (stats.maxDownloadMbps ? Number(stats.maxDownloadMbps).toFixed(1) + ' Mbps' : '—');
             }
-            if (dataUploadedSub && stats.maxUploadMbps > 0) {
-                dataUploadedSub.textContent = 'Last 30 days · peak ' + Number(stats.maxUploadMbps).toFixed(1) + ' Mbps';
+            if (dataUploadedSub) {
+                dataUploadedSub.textContent = 'Last 30 days · peak ' +
+                    (stats.maxUploadMbps ? Number(stats.maxUploadMbps).toFixed(1) + ' Mbps' : '—');
+            }
+            // Sparkline label row under the main speed chart
+            const peakLbl = document.getElementById('speedPeakLbl');
+            if (peakLbl) {
+                const p = Math.max(stats.maxDownloadMbps || 0, stats.maxUploadMbps || 0);
+                peakLbl.textContent = '30-day peak ' + (p > 0 ? p.toFixed(1) + ' Mbps' : '—');
+            }
+            const winLbl = document.getElementById('speedWindowLbl');
+            if (winLbl) {
+                const secs = refreshInterval / 1000 * speedHistory.length;
+                winLbl.textContent = 'last ' + (secs >= 60 ? Math.round(secs / 60) + ' min' : Math.round(secs) + 's');
             }
             
             // Cache per-connection quality stats for the adapters table.
@@ -837,40 +909,70 @@ function formatBytes(bytes) {
 /**
  * Push a new throughput sample into the sparkline history
  */
-function pushSpeedSample(mbps) {
+function pushSpeedSample(mbps, upMbps, peak) {
     speedHistory.push(mbps);
-    if (speedHistory.length > 40) {
-        speedHistory.shift();
-    }
-    renderSparkline();
+    if (speedHistory.length > 40) speedHistory.shift();
+    uploadHistory.push(upMbps || 0);
+    if (uploadHistory.length > 40) uploadHistory.shift();
+    renderSparkline('speedSparkline', speedHistory, '#34d399', { fill: true });
+    renderSparkline('uploadSparkline', uploadHistory, '#fbbf24');
+
+    // Peak speed sparklines: rolling window of the reported 30-day peak
+    // values (they only climb, so this traces the trend).
+    pushPeakSample('dlPeakSparkline', 'peakDlHistory', peak && peak.dl || 0);
+    pushPeakSample('upPeakSparkline', 'peakUpHistory', peak && peak.up || 0);
+}
+
+const peakHistories = {};
+function pushPeakSample(svgId, key, value) {
+    peakHistories[key] = peakHistories[key] || [];
+    peakHistories[key].push(value);
+    if (peakHistories[key].length > 40) peakHistories[key].shift();
+    renderSparkline(svgId, peakHistories[key], key === 'peakDlHistory' ? '#c084fc' : '#fbbf24');
 }
 
 /**
- * Render the inline SVG sparkline of recent total throughput
+ * Render an inline SVG sparkline of a rolling value window. Supports an
+ * optional gradient area fill, a min/max label row, and an upper limit
+ * for scaling (so 30-day peak values stay visible).
  */
-function renderSparkline() {
-    const svg = document.getElementById('speedSparkline');
-    if (!svg) return;
-    if (speedHistory.length < 2) {
-        svg.innerHTML = '';
-        return;
-    }
-    
+function renderSparkline(id, data, stroke, opts) {
+    const svg = document.getElementById(id);
+    if (!svg || !data || data.length < 2) return;
+
+    const o = opts || {};
     const w = 100, h = 30;
-    const max = Math.max(...speedHistory, 1);
-    const points = speedHistory
+    const max = Math.max(...data, 0.001);
+    const scaleMax = o.maxScale && o.maxScale > max ? o.maxScale : max;
+    const points = data
         .map((v, i) => {
-            const x = (i / (speedHistory.length - 1)) * w;
-            const y = h - (v / max) * (h - 4) - 2;
+            const x = (i / (data.length - 1)) * w;
+            const y = h - (Math.min(v, scaleMax) / scaleMax) * (h - 6) - 3;
             return `${x.toFixed(1)},${y.toFixed(1)}`;
         })
         .join(' ');
-    
-    svg.innerHTML =
-        `<polyline points="${points}" fill="none" stroke="#34d399" stroke-width="1.5"` +
-        ` vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"` +
-        ` opacity="0.85"/>`;
+
+    // Area fill (down to the baseline) when requested
+    let area = '';
+    if (o.fill) {
+        const gid = 'g-' + id.replace(/[^a-z]/gi, '');
+        area =
+            `<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="${stroke}" stop-opacity="0.35"/>
+                <stop offset="100%" stop-color="${stroke}" stop-opacity="0.02"/>
+            </linearGradient></defs>
+            <polygon points="0,${h} ${points} ${w},${h}" fill="url(#${gid})" stroke="none"/>
+            <polyline points="${points}" fill="none" stroke="${stroke}" stroke-width="1.5"
+                vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>
+            <circle cx="${w}" cy="${(h - (Math.min(data[data.length - 1], scaleMax) / scaleMax) * (h - 6) - 3).toFixed(1)}" r="1.8" fill="${stroke}"/>
+        `;
+    } else {
+        area = `<polyline points="${points}" fill="none" stroke="${stroke}" stroke-width="1.5"
+            vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>`;
+    }
+    svg.innerHTML = area;
 }
+
 
 /**
  * Escape a string for safe embedding in HTML

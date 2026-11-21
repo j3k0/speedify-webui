@@ -125,6 +125,30 @@ button:disabled {
     cursor: not-allowed;
 }
 
+/* Throughput bar (adapters table) */
+.thr-track {
+    flex: 1;
+    min-width: 70px;
+    height: 6px;
+    border-radius: 9999px;
+    background: rgba(156, 163, 175, 0.15);
+    overflow: hidden;
+}
+
+.thr-fill {
+    height: 100%;
+    border-radius: 9999px;
+    transition: width 0.6s ease;
+}
+
+/* Per-connection throughput note under the bar */
+.thr-val {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    line-height: 1.2;
+}
+
 /* Success message slide in */
 #actionMessage {
     animation: slideDown 0.3s ease-out;
