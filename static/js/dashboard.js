@@ -19,6 +19,8 @@ let currentServerTag = '';        // tag of the connected server (from /api/stat
 let serversLoadedAt = 0;          // servers list changes rarely; refresh every 10 min
 let historyHours = parseInt(localStorage.getItem('historyHours'), 10) || 24;
 let historyData = null;           // last /api/history payload
+let outagesExpanded = false;      // outage list: newest 5, or all ("show more")
+const OUTAGES_COLLAPSED = 5;
 let historyLoadedAt = 0;          // history is polled every 60 s, not every refresh
 let usageLoadedAt = 0;            // data budgets: polled every 60 s
 let devicesLoadedAt = 0;          // per-device traffic: server samples every 30 s
@@ -124,9 +126,17 @@ function setupEventListeners() {
         if (btn) renameDevice(btn.dataset.mac, btn.dataset.name, btn.dataset.label);
     });
     
+    // Outage list: "…show N more" / "Show less"
+    document.getElementById('outageTable').addEventListener('click', (e) => {
+        if (!e.target.closest('button[data-outages-toggle]')) return;
+        outagesExpanded = !outagesExpanded;
+        if (historyData) renderHistory(historyData);
+    });
+    
     // History range toggle (24 h / 7 d / 30 d)
     document.querySelectorAll('.history-range').forEach((btn) => {
         btn.addEventListener('click', () => {
+            outagesExpanded = false;
             historyHours = parseInt(btn.dataset.hours, 10) || 24;
             localStorage.setItem('historyHours', String(historyHours));
             updateHistoryRangeButtons();
@@ -1511,13 +1521,14 @@ function renderHistory(d) {
     const longOnes = outages.filter((g) => g.end - g.start >= 60).length;
     document.getElementById('outageCount').textContent =
         rows.length ? `· ${rows.length} in the ${rangeLabel} (${longOnes} ≥ 1 min)` : '';
-    const MAX_ROWS = 25;
     const tbody = document.getElementById('outageTable');
     if (rows.length === 0) {
         tbody.innerHTML = `<tr><td colspan="4" class="py-3 text-green-400">No outages in the ${rangeLabel} 🎉</td></tr>`;
         return;
     }
-    tbody.innerHTML = rows.slice(0, MAX_ROWS).map((g) => {
+    const hidden = Math.max(0, rows.length - OUTAGES_COLLAPSED);
+    const visible = outagesExpanded ? rows : rows.slice(0, OUTAGES_COLLAPSED);
+    tbody.innerHTML = visible.map((g) => {
         const dur = g.end - g.start;
         const dim = dur < 60 ? ' text-gray-500' : '';
         const r = reasonInfo(g.cause);
@@ -1527,8 +1538,10 @@ function renderHistory(d) {
             <td class="py-2 pr-3">${reasonPill(g.cause)} <span class="hidden md:inline text-xs text-gray-500">${escapeHtml(r.explain)}</span>${suspectsHtml(g)}</td>
             <td class="py-2 font-mono text-xs">${escapeHtml(g.server || '—')}</td>
         </tr>`;
-    }).join('') + (rows.length > MAX_ROWS
-        ? `<tr><td colspan="4" class="pt-2 text-xs text-gray-500">… and ${rows.length - MAX_ROWS} older</td></tr>` : '');
+    }).join('') + (hidden > 0
+        ? `<tr><td colspan="4" class="pt-3">
+            <button data-outages-toggle class="text-sm text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline">${
+                outagesExpanded ? 'Show less' : `…show ${hidden} more`}</button></td></tr>` : '');
 }
 
 /**
