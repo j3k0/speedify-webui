@@ -5,20 +5,22 @@ A modern, web-based dashboard for monitoring and controlling Speedify connection
 ## Features
 
 - **Real-time Monitoring**: Live connection status, speeds, and data usage
+- **Connection History**: 24 h / 7 d / 30 d up/down timeline built from Speedify's own session DB — every outage with its duration and plain-English cause (torrent cut, restart, lost connection…), availability %, longest outage
 - **Connection Control**: Connect, disconnect, and change servers with one click
 - **Network Adapters**: View all network adapters and their status
-- **Server Selection**: Choose from available countries/servers
+- **Server Selection**: Pick a specific server, the best one in a country, or the closest torrent-safe (P2P-allowed) server; the status card flags servers that ban P2P
+- **Works offline**: CSS is prebuilt and served locally, so the page still renders when the tunnel (and the internet) is down
 - **Bypass Management**: Add and remove domain bypasses for streaming
 - **Port Bypass**: Configure specific ports to bypass Speedify VPN
 - **Auto-refresh**: Configurable auto-refresh interval (default: 3 seconds)
 - **Modern UI**: Responsive design with Tailwind CSS
-- **Network Security**: Restricted to LAN access (192.168.0.0/16)
+- **Network Security**: Restricted to the router's LAN subnets (192.168.145.0/24, 192.168.146.0/24) + loopback; anti-CSRF header on all state-changing requests
 
 ## Requirements
 
 - Python 3.7 or higher
 - Speedify installed and running on the system
-- Access to the local network (192.168.0.0/16)
+- Access from one of the allowed LAN subnets (see Network Access)
 
 ## Installation
 
@@ -91,10 +93,18 @@ PORT = 20333  # Change to your preferred port
 
 ### Network Access
 
-By default, the dashboard only accepts connections from the `192.168.0.0/16` network range. To modify this, edit the `ALLOWED_NETWORK` variable in `app.py`:
+By default, the dashboard only accepts connections from `192.168.145.0/24`, `192.168.146.0/24` (pi3's LAN subnets) and loopback (SSH tunnels). It deliberately does **not** allow all of `192.168.0.0/16`: that would include the upstream Archer C5 network on pi3's WAN side. Override with an environment variable (comma-separated CIDRs) in the systemd unit:
 
-```python
-ALLOWED_NETWORK = ipaddress.ip_network('192.168.0.0/16')
+```ini
+Environment="WEBUI_ALLOWED_NETWORKS=192.168.145.0/24,192.168.146.0/24,127.0.0.0/8,::1/128"
+```
+
+### Styling (Tailwind)
+
+Tailwind is prebuilt into `static/css/tailwind.css` (committed) instead of loading the Play CDN, so the dashboard keeps its styling when the internet is down. After adding or changing Tailwind classes in `templates/` or `static/js/`, rebuild on a machine with Node and commit the result:
+
+```bash
+./scripts/build-css.sh
 ```
 
 ### Auto-refresh Interval
@@ -149,11 +159,12 @@ The dashboard exposes several REST API endpoints:
 | GET | `/api/adapters` | Network adapters |
 | GET | `/api/servers` | Available servers |
 | GET | `/api/stats` | Connection statistics |
+| GET | `/api/history?hours=24` | Up/down segments, outages and disconnect reasons (1–744 h) from Speedify's session DB |
 | GET | `/api/bypasses` | Domain bypasses list |
 | GET | `/api/port-bypasses` | Port bypasses list |
 | POST | `/api/connect` | Connect to Speedify |
 | POST | `/api/disconnect` | Disconnect from Speedify |
-| POST | `/api/server` | Change server (requires `country` in JSON body) |
+| POST | `/api/server` | Change server: JSON `{"target": "p2p" \| "closest" \| "<country code>" \| "<server tag>"}` |
 | POST | `/api/bypasses` | Add bypass (requires `domain` in JSON body) |
 | POST | `/api/port-bypasses` | Add port bypass (requires `port` in JSON body) |
 | DELETE | `/api/bypasses/<domain>` | Remove bypass |
@@ -161,7 +172,8 @@ The dashboard exposes several REST API endpoints:
 
 ## Security
 
-- **IP Restriction**: Access is restricted to the `192.168.0.0/16` network range
+- **IP Restriction**: Access is restricted to `192.168.145.0/24`, `192.168.146.0/24` and loopback
+- **CSRF protection**: POST/DELETE requests must carry `X-Requested-With: speedify-webui` (the dashboard's JS adds it). Browsers can't send that header cross-origin without a CORS preflight, so a web page opened on a LAN device can't trigger actions
 - **No Authentication**: Since access is limited to the local network, no additional authentication is implemented
 - **Isolated Dependencies**: Uses a virtual environment to avoid conflicts with system packages
 
@@ -175,7 +187,7 @@ The dashboard exposes several REST API endpoints:
 ### Can't access from other devices
 - Verify the server machine's IP address: `ip addr` or `hostname -I`
 - Ensure firewall allows connections on port 20333
-- Confirm you're accessing from the 192.168.0.0/16 network range
+- Confirm you're accessing from an allowed subnet (192.168.145.0/24 or 192.168.146.0/24)
 
 ### Speedify API errors
 - Ensure Speedify is installed and running: `speedify show state`

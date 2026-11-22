@@ -15,6 +15,24 @@ let speedHistory = [];            // last N total-throughput samples (Mbps)
 let uploadHistory = [];           // last N upload samples (Mbps)
 let connectionMap = {};           // adapterID -> per-connection quality stats
 let messageTimer = null;
+let currentServerTag = '';        // tag of the connected server (from /api/status)
+let serversLoadedAt = 0;          // servers list changes rarely; refresh every 10 min
+let historyHours = parseInt(localStorage.getItem('historyHours'), 10) || 24;
+let historyData = null;           // last /api/history payload
+let historyLoadedAt = 0;          // history is polled every 60 s, not every refresh
+
+const SERVERS_TTL_MS = 10 * 60 * 1000;
+const HISTORY_TTL_MS = 60 * 1000;
+
+/**
+ * fetch() wrapper that adds the anti-CSRF header the backend requires on
+ * POST/DELETE (a cross-site page can't send custom headers without a CORS
+ * preflight, which the backend never grants).
+ */
+function apiFetch(url, options = {}) {
+    const headers = Object.assign({ 'X-Requested-With': 'speedify-webui' }, options.headers || {});
+    return fetch(url, Object.assign({}, options, { headers }));
+}
 
 // Speed tracking state - no longer needed, keeping for compatibility
 // Bandwidth is now calculated server-side from Speedify's real-time stats
@@ -84,7 +102,27 @@ function setupEventListeners() {
     document.getElementById('disconnectBtn').addEventListener('click', disconnectSpeedify);
     
     // Change server button
-    document.getElementById('changeServerBtn').addEventListener('click', changeServer);
+    document.getElementById('changeServerBtn').addEventListener('click', () => {
+        const select = document.getElementById('serverSelect');
+        const option = select.options[select.selectedIndex];
+        changeServer(select.value, option ? option.dataset.label || option.textContent : '');
+    });
+    
+    // One-click torrent-safe server (`speedify_cli connect p2p`)
+    document.getElementById('p2pServerBtn').addEventListener('click', () => {
+        changeServer('p2p', 'the closest torrent-safe server');
+    });
+    
+    // History range toggle (24 h / 7 d / 30 d)
+    document.querySelectorAll('.history-range').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            historyHours = parseInt(btn.dataset.hours, 10) || 24;
+            localStorage.setItem('historyHours', String(historyHours));
+            updateHistoryRangeButtons();
+            loadHistory(true);
+        });
+    });
+    updateHistoryRangeButtons();
     
     // Add bypass button
     document.getElementById('addBypassBtn').addEventListener('click', addBypass);
@@ -210,10 +248,11 @@ async function loadAllData() {
     const [statusOk] = await Promise.all([
         loadStatus(),
         loadAdapters(),
-        loadServers(),
+        loadServers(),     // self-throttled (SERVERS_TTL_MS)
         loadBypasses(),
         loadPortBypasses(),
-        loadStats()
+        loadStats(),
+        loadHistory()      // self-throttled (HISTORY_TTL_MS)
     ]);
     updateLastUpdated(!!statusOk);
 }
@@ -260,13 +299,23 @@ async function loadStatus() {
             
             // Update current server
             const serverElement = document.getElementById('currentServer');
-            if (state.city && state.country) {
+            const previousTag = currentServerTag;
+            currentServerTag = state.serverTag || '';
+            if (state.serverName) {
+                serverElement.textContent = state.serverName;
+                serverElement.title = state.serverTag || '';
+            } else if (state.city && state.country) {
                 serverElement.textContent = `${state.city}, ${state.country.toUpperCase()}`;
             } else if (state.country) {
                 serverElement.textContent = state.country.toUpperCase();
             } else {
                 serverElement.textContent = '—';
             }
+            updateP2pBadge(state.torrentAllowed);
+            if (previousTag !== currentServerTag) {
+                renderServerSelect();   // move the "current" marker
+            }
+            updateSessionInfo();
             
             // Update public IP
             const ipElement = document.getElementById('publicIp');
@@ -444,7 +493,10 @@ function getAdapterStateHtml(state) {
 /**
  * Load available servers
  */
-async function loadServers() {
+async function loadServers(force) {
+    // `speedify_cli show servers` is slow on a Pi 3 and rarely changes
+    if (!force && Date.now() - serversLoadedAt < SERVERS_TTL_MS) return;
+    serversLoadedAt = Date.now();
     try {
         const response = await fetch('/api/servers');
         const result = await response.json();
@@ -452,31 +504,118 @@ async function loadServers() {
         if (result.success && result.data) {
             // Handle server data structure: { private: [], public: [] }
             const serverData = result.data;
-            const publicServers = serverData.public || [];
-            const privateServers = serverData.private || [];
-            
-            // Combine all servers
-            availableServers = [...publicServers, ...privateServers];
-            
-            // Populate country select
-            const select = document.getElementById('countrySelect');
-            
-            // Save current selection
-            const currentSelection = select.value;
-            
-            // Extract unique countries
-            const countries = [...new Set(availableServers.map(s => s.country))].sort();
-            
-            select.innerHTML = '<option value="">Select Country...</option>' + 
-                countries.map(country => `<option value="${country}">${country.toUpperCase()}</option>`).join('');
-            
-            // Restore selection if it still exists
-            if (currentSelection && countries.includes(currentSelection)) {
-                select.value = currentSelection;
-            }
+            availableServers = [...(serverData.public || []), ...(serverData.private || [])];
+            renderServerSelect();
+        } else {
+            serversLoadedAt = 0;   // retry on next refresh
         }
     } catch (error) {
+        serversLoadedAt = 0;
         console.error('Error loading servers:', error);
+    }
+}
+
+/**
+ * Country display name from a server's friendlyName ("Belgium - Oostkamp #3")
+ */
+function serverCountryName(server) {
+    const name = String(server.friendlyName || '');
+    return name.includes(' - ') ? name.split(' - ')[0] : String(server.country || '').toUpperCase();
+}
+
+/**
+ * Server label without the country prefix ("Oostkamp #3")
+ */
+function serverShortName(server) {
+    const name = String(server.friendlyName || server.tag || '');
+    return name.includes(' - ') ? name.split(' - ').slice(1).join(' - ') : name;
+}
+
+/**
+ * Fill the server picker:
+ *   1. torrent-safe servers (P2P allowed) + "closest torrent-safe"
+ *   2. "any server in <country>" (Speedify picks the best one)
+ *   3. every individual server, grouped by country
+ * Option values are what `speedify_cli connect` accepts: p2p, a country
+ * code, or a server tag.
+ */
+function renderServerSelect() {
+    const select = document.getElementById('serverSelect');
+    if (!select || availableServers.length === 0) return;
+    const previous = select.value;
+
+    const opt = (value, label, extra = '') =>
+        `<option value="${escapeHtml(value)}" data-label="${escapeHtml(label)}">${escapeHtml(label)}${extra}</option>`;
+    const current = (tag) => (tag && tag === currentServerTag ? ' ← current' : '');
+
+    const p2p = availableServers
+        .filter((s) => s.torrentAllowed)
+        .sort((a, b) => String(a.friendlyName).localeCompare(String(b.friendlyName), undefined, { numeric: true }));
+
+    const byCountry = {};
+    for (const s of availableServers) {
+        const cc = String(s.country || '').toLowerCase();
+        if (!cc) continue;
+        (byCountry[cc] = byCountry[cc] || { name: serverCountryName(s), servers: [] }).servers.push(s);
+    }
+    const countries = Object.keys(byCountry).sort((a, b) => byCountry[a].name.localeCompare(byCountry[b].name));
+
+    let html = '<option value="">Select server…</option>';
+    html += '<optgroup label="Torrent-safe (P2P allowed)">';
+    html += opt('p2p', 'Closest torrent-safe server');
+    html += p2p.map((s) => opt(s.tag, s.friendlyName || s.tag, current(s.tag))).join('');
+    html += '</optgroup>';
+
+    html += '<optgroup label="Best server in a country">';
+    html += countries.map((cc) => {
+        const c = byCountry[cc];
+        const nP2p = c.servers.filter((s) => s.torrentAllowed).length;
+        const note = ` (${c.servers.length}${nP2p ? `, ${nP2p} P2P` : ''})`;
+        return opt(cc, c.name, note);
+    }).join('');
+    html += '</optgroup>';
+
+    for (const cc of countries) {
+        const c = byCountry[cc];
+        const servers = c.servers.slice().sort((a, b) =>
+            serverShortName(a).localeCompare(serverShortName(b), undefined, { numeric: true }));
+        html += `<optgroup label="${escapeHtml(c.name)}">`;
+        html += servers.map((s) =>
+            opt(s.tag, s.friendlyName || s.tag, (s.torrentAllowed ? ' · P2P' : '') + current(s.tag))).join('');
+        html += '</optgroup>';
+    }
+
+    select.innerHTML = html;
+    if (previous && [...select.options].some((o) => o.value === previous)) {
+        select.value = previous;
+    }
+
+    const countEl = document.getElementById('p2pServerCount');
+    if (countEl) {
+        const p2pCountries = [...new Set(p2p.map((s) => String(s.country || '').toUpperCase()))];
+        countEl.textContent = p2p.length
+            ? `${p2p.length} of ${availableServers.length} servers, in ${p2pCountries.join(', ')}`
+            : 'none available right now';
+    }
+}
+
+/**
+ * P2P badge next to the server name in the status card
+ */
+function updateP2pBadge(torrentAllowed) {
+    const badge = document.getElementById('p2pBadge');
+    if (!badge) return;
+    if (torrentAllowed === true) {
+        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 border border-emerald-500/30 text-emerald-300';
+        badge.textContent = 'P2P OK';
+        badge.title = 'This server allows torrents: P2P traffic will not cut the tunnel.';
+    } else if (torrentAllowed === false) {
+        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-500/10 border border-amber-500/30 text-amber-300';
+        badge.textContent = 'No P2P';
+        badge.title = 'This server bans P2P: if any device torrents, the server cuts the tunnel for the whole house (reason TORRENT).';
+    } else {
+        badge.className = 'hidden';
+        badge.textContent = '';
     }
 }
 
@@ -652,14 +791,14 @@ async function connectSpeedify() {
     try {
         showActionMessage('Connecting...', 'info');
         
-        const response = await fetch('/api/connect', {
+        const response = await apiFetch('/api/connect', {
             method: 'POST'
         });
         const result = await response.json();
         
         if (result.success) {
             showActionMessage('Connected successfully!', 'success');
-            await loadStatus();
+            await Promise.all([loadStatus(), loadHistory(true)]);
         } else {
             showActionMessage(`Failed to connect: ${result.error}`, 'error');
         }
@@ -676,14 +815,14 @@ async function disconnectSpeedify() {
     try {
         showActionMessage('Disconnecting...', 'info');
         
-        const response = await fetch('/api/disconnect', {
+        const response = await apiFetch('/api/disconnect', {
             method: 'POST'
         });
         const result = await response.json();
         
         if (result.success) {
             showActionMessage('Disconnected successfully!', 'success');
-            await loadStatus();
+            await Promise.all([loadStatus(), loadHistory(true)]);
         } else {
             showActionMessage(`Failed to disconnect: ${result.error}`, 'error');
         }
@@ -696,36 +835,42 @@ async function disconnectSpeedify() {
 /**
  * Change server
  */
-async function changeServer() {
+async function changeServer(target, label) {
+    if (!target) {
+        showActionMessage('Please select a server', 'error');
+        return;
+    }
+    const name = label || target;
+    // Every LAN client rides the tunnel: a switch drops the whole house
+    if (!confirm(`Switch to ${name}?\n\nInternet drops for everyone in the house for a few seconds.`)) {
+        return;
+    }
+
+    const buttons = ['changeServerBtn', 'p2pServerBtn'].map((id) => document.getElementById(id));
+    buttons.forEach((b) => { b.disabled = true; });
     try {
-        const select = document.getElementById('countrySelect');
-        const country = select.value;
+        showActionMessage(`Switching to ${name}…`, 'info');
         
-        if (!country) {
-            showActionMessage('Please select a country', 'error');
-            return;
-        }
-        
-        showActionMessage(`Changing server to ${country}...`, 'info');
-        
-        const response = await fetch('/api/server', {
+        const response = await apiFetch('/api/server', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ country })
+            body: JSON.stringify({ target })
         });
         const result = await response.json();
         
         if (result.success) {
-            showActionMessage(`Server changed to ${country}!`, 'success');
-            await loadStatus();
+            showActionMessage(result.message || `Connected to ${name}`, 'success');
+            await Promise.all([loadStatus(), loadHistory(true)]);
         } else {
             showActionMessage(`Failed to change server: ${result.error}`, 'error');
         }
     } catch (error) {
         console.error('Error changing server:', error);
         showActionMessage('Error changing server', 'error');
+    } finally {
+        buttons.forEach((b) => { b.disabled = false; });
     }
 }
 
@@ -744,7 +889,7 @@ async function addBypass() {
         
         showActionMessage(`Adding bypass for ${domain}...`, 'info');
         
-        const response = await fetch('/api/bypasses', {
+        const response = await apiFetch('/api/bypasses', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -773,7 +918,7 @@ async function removeBypass(domain) {
     try {
         showActionMessage(`Removing bypass for ${domain}...`, 'info');
         
-        const response = await fetch(`/api/bypasses/${encodeURIComponent(domain)}`, {
+        const response = await apiFetch(`/api/bypasses/${encodeURIComponent(domain)}`, {
             method: 'DELETE'
         });
         const result = await response.json();
@@ -811,7 +956,7 @@ async function addPortBypass() {
         
         showActionMessage(`Adding port bypass for port ${portNum}...`, 'info');
         
-        const response = await fetch('/api/port-bypasses', {
+        const response = await apiFetch('/api/port-bypasses', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -840,7 +985,7 @@ async function removePortBypass(port) {
     try {
         showActionMessage(`Removing port bypass for port ${port}...`, 'info');
         
-        const response = await fetch(`/api/port-bypasses/${encodeURIComponent(port)}`, {
+        const response = await apiFetch(`/api/port-bypasses/${encodeURIComponent(port)}`, {
             method: 'DELETE'
         });
         const result = await response.json();
@@ -856,6 +1001,288 @@ async function removePortBypass(port) {
         showActionMessage('Error removing port bypass', 'error');
     }
 };
+
+/**
+ * Disconnect reasons recorded by Speedify (sessions.disconnect_reason),
+ * with plain-English explanations. Class strings are written out in full
+ * so the Tailwind build picks them up.
+ */
+const REASONS = {
+    TORRENT: {
+        label: 'Torrent cut', bar: 'bg-red-500',
+        pill: 'bg-red-500/15 border-red-500/30 text-red-300',
+        explain: 'The Speedify server cut the tunnel: a device on the LAN sent BitTorrent traffic and this server bans P2P.'
+    },
+    CONNECTIVITY: {
+        label: 'Lost connection', bar: 'bg-amber-500',
+        pill: 'bg-amber-500/15 border-amber-500/30 text-amber-300',
+        explain: 'Speedify lost contact with the server (uplinks down or unstable).'
+    },
+    STARTTIMEOUT: {
+        label: 'Start timeout', bar: 'bg-orange-500',
+        pill: 'bg-orange-500/15 border-orange-500/30 text-orange-300',
+        explain: 'The tunnel could not be (re)established in time.'
+    },
+    REBOOT: {
+        label: 'Restart', bar: 'bg-purple-500',
+        pill: 'bg-purple-500/15 border-purple-500/30 text-purple-300',
+        explain: 'pi3 or the Speedify service restarted.'
+    },
+    USERINITIATED: {
+        label: 'Manual / switch', bar: 'bg-sky-500',
+        pill: 'bg-sky-500/15 border-sky-500/30 text-sky-300',
+        explain: 'Disconnected on purpose: manual disconnect, server change, or the night-window script.'
+    },
+    UNKNOWN: {
+        label: 'Unknown', bar: 'bg-gray-500',
+        pill: 'bg-gray-500/15 border-gray-500/30 text-gray-300',
+        explain: 'Speedify recorded no reason.'
+    }
+};
+
+function reasonInfo(reason) {
+    return REASONS[reason] || Object.assign({}, REASONS.UNKNOWN, {
+        label: reason ? reason.charAt(0) + reason.slice(1).toLowerCase() : 'Unknown',
+        explain: reason ? `Speedify reason: ${reason}` : REASONS.UNKNOWN.explain
+    });
+}
+
+function reasonPill(reason) {
+    const r = reasonInfo(reason);
+    return `<span class="inline-flex items-center px-2 py-0.5 rounded-full border text-xs font-medium ${r.pill}" title="${escapeHtml(r.explain)}">${escapeHtml(r.label)}</span>`;
+}
+
+/**
+ * "45 s", "12 min", "1 h 35 min", "2 d 3 h"
+ */
+function formatDuration(seconds) {
+    const s = Math.max(0, Math.round(seconds));
+    if (s < 60) return `${s} s`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m} min`;
+    const h = Math.floor(s / 3600);
+    if (h < 24) return `${h} h ${Math.round((s % 3600) / 60)} min`;
+    return `${Math.floor(h / 24)} d ${h % 24} h`;
+}
+
+function formatClock(ts) {
+    return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+/**
+ * "Today 06:04", "Yesterday 23:59", "Sun 06:04", "15 Nov 19:36"
+ */
+function formatWhen(ts) {
+    const d = new Date(ts * 1000);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const dayDiff = Math.round((today - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
+    const clock = formatClock(ts);
+    if (dayDiff === 0) return `Today ${clock}`;
+    if (dayDiff === 1) return `Yesterday ${clock}`;
+    if (dayDiff < 7) return `${d.toLocaleDateString([], { weekday: 'short' })} ${clock}`;
+    return `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${clock}`;
+}
+
+function updateHistoryRangeButtons() {
+    document.querySelectorAll('.history-range').forEach((btn) => {
+        const active = parseInt(btn.dataset.hours, 10) === historyHours;
+        btn.classList.toggle('bg-blue-600', active);
+        btn.classList.toggle('text-white', active);
+        btn.classList.toggle('text-gray-400', !active);
+        btn.classList.toggle('hover:bg-gray-700', !active);
+    });
+}
+
+/**
+ * Load the up/down timeline (Speedify session DB). Throttled to once a
+ * minute unless forced (range change, connect/disconnect, server switch).
+ */
+async function loadHistory(force) {
+    if (!force && Date.now() - historyLoadedAt < HISTORY_TTL_MS) return;
+    historyLoadedAt = Date.now();
+    const hours = historyHours;
+    try {
+        const response = await fetch(`/api/history?hours=${hours}`);
+        const result = await response.json();
+        if (hours !== historyHours) return;   // range changed meanwhile
+        if (result.success && result.data) {
+            historyData = result.data;
+            renderHistory(historyData);
+            updateSessionInfo();
+        } else {
+            throw new Error(result.error || 'history unavailable');
+        }
+    } catch (error) {
+        console.error('Error loading history:', error);
+        historyLoadedAt = Date.now() - HISTORY_TTL_MS + 15000;   // retry in 15 s
+        const summary = document.getElementById('historySummary');
+        if (summary && !historyData) {
+            summary.innerHTML = '<div class="text-red-400 text-sm col-span-2">Could not read Speedify history</div>';
+        }
+    }
+}
+
+function statCard(label, value, sub, valueClass) {
+    return `<div class="rounded-lg bg-gray-900/60 border border-gray-700 px-3 py-2">
+        <div class="text-xs text-gray-500 uppercase tracking-wide">${label}</div>
+        <div class="text-xl font-bold tabular-nums ${valueClass || 'text-gray-200'}">${value}</div>
+        <div class="text-xs text-gray-500 mt-0.5">${sub || '&nbsp;'}</div>
+    </div>`;
+}
+
+function renderHistory(d) {
+    const span = Math.max(1, d.now - d.since);
+    const pct = (t) => ((t - d.since) / span) * 100;
+    const s = d.summary || {};
+    const segments = d.segments || [];
+    const outages = segments.filter((g) => g.type === 'down');
+    const rangeLabel = d.hours <= 24 ? 'last 24 h' : `last ${Math.round(d.hours / 24)} days`;
+
+    // --- Headline numbers ---
+    const avail = s.availability;
+    const availClass = avail == null ? 'text-gray-400'
+        : avail >= 0.99 ? 'text-green-400' : avail >= 0.95 ? 'text-yellow-400' : 'text-red-400';
+    const availText = avail == null ? '—'
+        : (avail >= 0.9995 ? '100' : (avail * 100).toFixed(avail >= 0.99 ? 2 : 1)) + '%';
+
+    const cuts = Object.entries(s.cuts || {}).sort((a, b) => b[1] - a[1]);
+    const torrentCuts = (s.cuts || {}).TORRENT || 0;
+    const cutsHtml = cuts.length
+        ? cuts.map(([reason, n]) => `<span class="whitespace-nowrap">${escapeHtml(reasonInfo(reason).label)} ×${n}</span>`).join(' · ')
+        : 'none';
+
+    const longest = s.longestOutage;
+    const longestSub = longest
+        ? `${formatWhen(longest.start)} · ${escapeHtml(reasonInfo(longest.cause).label)}`
+        : 'no outages';
+
+    document.getElementById('historySummary').innerHTML =
+        statCard('Online', availText, `${formatDuration(s.upSeconds || 0)} up · ${rangeLabel}`, availClass) +
+        statCard('Offline', formatDuration(s.downSeconds || 0),
+            `${s.outageCount || 0} outage${s.outageCount === 1 ? '' : 's'} ≥ 1 min`,
+            (s.downSeconds || 0) >= 600 ? 'text-red-400' : (s.downSeconds || 0) > 0 ? 'text-yellow-400' : 'text-green-400') +
+        statCard('Torrent cuts', String(torrentCuts), `all disconnects: ${cutsHtml}`,
+            torrentCuts ? 'text-red-400' : 'text-green-400') +
+        statCard('Longest outage', longest ? formatDuration(longest.end - longest.start) : '—', longestSub,
+            longest && longest.end - longest.start >= 600 ? 'text-red-400' : 'text-gray-200');
+
+    // --- Timeline strip ---
+    const ticks = historyTicks(d.since, d.now, d.hours);
+    let strip = ticks.map(([t]) =>
+        `<div class="absolute top-0 bottom-0 w-px bg-black/40" style="left:${pct(t).toFixed(3)}%"></div>`).join('');
+    // up first, outages on top (min 2px so short cuts stay visible)
+    for (const g of segments.filter((x) => x.type === 'up')) {
+        const title = `Online ${formatWhen(g.start)} → ${g.ongoing ? 'now' : formatClock(g.end)} (${formatDuration(g.end - g.start)})` +
+            ` · ${g.server}` + (g.ongoing ? '' : ` · ended: ${reasonInfo(g.endReason).label}`);
+        strip += `<div class="absolute top-0 bottom-0 bg-green-600/80" style="left:${pct(g.start).toFixed(3)}%;width:${(pct(g.end) - pct(g.start)).toFixed(3)}%" title="${escapeHtml(title)}"></div>`;
+    }
+    for (const g of outages) {
+        const r = reasonInfo(g.cause);
+        const title = `Offline ${formatWhen(g.start)} → ${g.ongoing ? 'now' : formatClock(g.end)} (${formatDuration(g.end - g.start)}) · ${r.label}: ${r.explain}`;
+        strip += `<div class="absolute top-0 bottom-0 ${r.bar}" style="left:${pct(g.start).toFixed(3)}%;width:${(pct(g.end) - pct(g.start)).toFixed(3)}%;min-width:2px" title="${escapeHtml(title)}"></div>`;
+    }
+    document.getElementById('historyStrip').innerHTML = strip;
+
+    // --- Axis labels (skip ones that would hit the edges) ---
+    document.getElementById('historyAxis').innerHTML = ticks
+        .filter(([t]) => pct(t) > 4 && pct(t) < 94)
+        .map(([t, label]) => `<span class="absolute -translate-x-1/2 whitespace-nowrap" style="left:${pct(t).toFixed(3)}%">${escapeHtml(label)}</span>`)
+        .join('') + '<span class="absolute right-0">now</span>';
+
+    // --- Legend: online + the causes present in this range ---
+    const causes = [...new Set(outages.map((g) => g.cause || 'UNKNOWN'))];
+    document.getElementById('historyLegend').innerHTML =
+        '<span class="inline-flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm bg-green-600/80"></span>Online</span>' +
+        causes.map((c) => {
+            const r = reasonInfo(c);
+            return `<span class="inline-flex items-center gap-1.5" title="${escapeHtml(r.explain)}"><span class="w-3 h-3 rounded-sm ${r.bar}"></span>Offline: ${escapeHtml(r.label)}</span>`;
+        }).join('');
+
+    // --- Outage table (newest first) ---
+    const rows = outages.slice().reverse();
+    const longOnes = outages.filter((g) => g.end - g.start >= 60).length;
+    document.getElementById('outageCount').textContent =
+        rows.length ? `· ${rows.length} in the ${rangeLabel} (${longOnes} ≥ 1 min)` : '';
+    const MAX_ROWS = 25;
+    const tbody = document.getElementById('outageTable');
+    if (rows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" class="py-3 text-green-400">No outages in the ${rangeLabel} 🎉</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = rows.slice(0, MAX_ROWS).map((g) => {
+        const dur = g.end - g.start;
+        const dim = dur < 60 ? ' text-gray-500' : '';
+        const r = reasonInfo(g.cause);
+        return `<tr class="border-b border-gray-700/60${dim}">
+            <td class="py-2 pr-3 whitespace-nowrap tabular-nums">${escapeHtml(formatWhen(g.start))}</td>
+            <td class="py-2 pr-3 whitespace-nowrap tabular-nums ${dur >= 600 ? 'text-red-300 font-medium' : ''}">${formatDuration(dur)}${g.ongoing ? ' <span class="text-red-400">(ongoing)</span>' : ''}</td>
+            <td class="py-2 pr-3">${reasonPill(g.cause)} <span class="hidden md:inline text-xs text-gray-500">${escapeHtml(r.explain)}</span></td>
+            <td class="py-2 font-mono text-xs">${escapeHtml(g.server || '—')}</td>
+        </tr>`;
+    }).join('') + (rows.length > MAX_ROWS
+        ? `<tr><td colspan="4" class="pt-2 text-xs text-gray-500">… and ${rows.length - MAX_ROWS} older</td></tr>` : '');
+}
+
+/**
+ * Axis ticks aligned to the local clock: every 6 h (24 h view),
+ * every midnight (7 d view) or every 5 days (30 d view).
+ */
+function historyTicks(since, now, hours) {
+    const ticks = [];
+    const t = new Date(since * 1000);
+    if (hours <= 48) {
+        const step = hours <= 24 ? 6 : 12;
+        t.setMinutes(0, 0, 0);
+        t.setHours(Math.ceil((t.getHours() + 1) / step) * step);
+        while (t.getTime() / 1000 <= now) {
+            ticks.push([t.getTime() / 1000, formatClock(t.getTime() / 1000)]);
+            t.setHours(t.getHours() + step);
+        }
+    } else {
+        const step = hours <= 24 * 8 ? 1 : 5;
+        t.setHours(24, 0, 0, 0);   // next local midnight
+        while (t.getTime() / 1000 <= now) {
+            const label = step === 1
+                ? t.toLocaleDateString([], { weekday: 'short' })
+                : t.toLocaleDateString([], { day: 'numeric', month: 'short' });
+            ticks.push([t.getTime() / 1000, label]);
+            t.setDate(t.getDate() + step);
+        }
+    }
+    return ticks;
+}
+
+/**
+ * One-line "why" next to the status pill: current session age and the
+ * last cut, or how long we've been offline and why.
+ */
+function updateSessionInfo() {
+    const el = document.getElementById('sessionInfo');
+    if (!el || !historyData) return;
+    const segments = historyData.segments || [];
+    const nowSec = Date.now() / 1000;
+    const lastUp = segments.filter((g) => g.type === 'up').pop();
+    const lastDown = segments.filter((g) => g.type === 'down').pop();
+
+    if (isConnected) {
+        const parts = [];
+        if (lastUp && lastUp.ongoing) parts.push(`up ${formatDuration(nowSec - lastUp.sessionStart)}`);
+        if (lastDown && !lastDown.ongoing) {
+            parts.push(`last cut ${formatWhen(lastDown.start)} (${reasonInfo(lastDown.cause).label.toLowerCase()})`);
+        }
+        el.textContent = parts.join(' · ');
+        el.className = 'text-sm text-gray-400';
+        el.title = lastDown ? reasonInfo(lastDown.cause).explain : '';
+    } else {
+        const reason = (lastDown && lastDown.ongoing && lastDown.cause) || historyData.lastDisconnectReason;
+        const r = reasonInfo(reason);
+        const since = lastDown && lastDown.ongoing ? ` for ${formatDuration(nowSec - lastDown.start)}` : '';
+        el.textContent = `offline${since} · ${r.label}`;
+        el.className = 'text-sm text-red-300';
+        el.title = r.explain;
+    }
+}
 
 /**
  * Update button states based on connection status

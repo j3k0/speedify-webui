@@ -5,8 +5,11 @@ A Flask-based web interface for monitoring and controlling Speedify
 """
 
 from flask import Flask, render_template, jsonify, request, abort
-from functools import wraps
 import ipaddress
+import os
+import re
+import sqlite3
+import time
 import speedify
 import traceback
 
@@ -14,38 +17,62 @@ app = Flask(__name__)
 
 # Configuration
 PORT = 20333
-ALLOWED_NETWORK = ipaddress.ip_network('192.168.0.0/16')
+
+# Only the router's own LAN subnets (eth-builtin / wlan-builtin) plus
+# loopback (SSH tunnels). NOT 192.168.0.0/16: that would also admit the
+# Archer C5's upstream network on the WAN side (pi3 is 192.168.0.105 there).
+# Override with WEBUI_ALLOWED_NETWORKS="cidr,cidr,...".
+ALLOWED_NETWORKS = [
+    ipaddress.ip_network(n.strip())
+    for n in os.environ.get(
+        'WEBUI_ALLOWED_NETWORKS',
+        '192.168.145.0/24,192.168.146.0/24,127.0.0.0/8,::1/128'
+    ).split(',')
+    if n.strip()
+]
+ALLOWED_NETWORKS_LABEL = ', '.join(
+    str(n) for n in ALLOWED_NETWORKS if not n.is_loopback
+)
+
+# State-changing requests must carry this header. Browsers refuse to send a
+# custom header cross-origin without a CORS preflight (which we never
+# grant), so a random web page opened on a LAN device cannot e.g. POST
+# /api/disconnect.
+CSRF_HEADER = 'X-Requested-With'
+CSRF_VALUE = 'speedify-webui'
+
+# Speedify's own session history (world-readable, WAL mode). mode=ro
+# reads the WAL too, so the current session is included.
+SPEEDIFY_DB_URI = 'file:/usr/share/speedify/logs/sql.db?mode=ro'
+
+# Valid targets for `speedify_cli connect`: keywords, a 2-letter country
+# code, or a server tag such as "nl-amsterdam-5".
+CONNECT_KEYWORDS = {'closest', 'p2p', 'public', 'private', 'last'}
+COUNTRY_RE = re.compile(r'^[a-z]{2}$')
+SERVER_TAG_RE = re.compile(r'^[a-z]{2}-[a-z0-9]+(?:-[a-z0-9]+)*$')
 
 
-def require_local_network(f):
-    """Decorator to restrict access to local network (192.168.0.0/16)"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        client_ip = request.remote_addr
-        
-        try:
-            # Check if the client IP is in the allowed network
-            if ipaddress.ip_address(client_ip) not in ALLOWED_NETWORK:
-                abort(403, description="Access denied: Only accessible from 192.168.0.0/16")
-        except ValueError:
-            # Invalid IP address format
-            abort(403, description="Access denied: Invalid IP address")
-        
-        return f(*args, **kwargs)
-    return decorated_function
+def client_allowed(addr):
+    """True if the client address is inside one of ALLOWED_NETWORKS"""
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    if getattr(ip, 'ipv4_mapped', None):
+        ip = ip.ipv4_mapped
+    return any(ip in net for net in ALLOWED_NETWORKS if ip.version == net.version)
 
 
 # Apply middleware to all routes
 @app.before_request
-def check_ip():
-    """Check IP address before processing any request"""
-    client_ip = request.remote_addr
-    
-    try:
-        if ipaddress.ip_address(client_ip) not in ALLOWED_NETWORK:
-            abort(403, description="Access denied: Only accessible from 192.168.0.0/16")
-    except ValueError:
-        abort(403, description="Access denied: Invalid IP address")
+def check_access():
+    """Restrict to the LAN and require the CSRF header on mutations"""
+    if not client_allowed(request.remote_addr):
+        abort(403, description=f"Access denied: only accessible from {ALLOWED_NETWORKS_LABEL}")
+
+    if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        if request.headers.get(CSRF_HEADER) != CSRF_VALUE:
+            abort(403, description=f"Missing {CSRF_HEADER} header")
 
 
 @app.route('/')
@@ -77,11 +104,17 @@ def get_status():
             public_ip = current_server.get('publicIp', '') or current_server.get('publicIP', '') or current_server.get('ip', '')
         
         # Build response
+        server = current_server if isinstance(current_server, dict) else {}
         status_data = {
             'state': state.name if hasattr(state, 'name') else str(state),
             'connected': state.name in ['CONNECTED', 'ENABLED'] if hasattr(state, 'name') else False,
-            'country': current_server.get('country', '') if isinstance(current_server, dict) else '',
-            'city': current_server.get('city', '') if isinstance(current_server, dict) else '',
+            'country': server.get('country', ''),
+            'city': server.get('city', ''),
+            'serverTag': server.get('tag', ''),
+            'serverName': server.get('friendlyName', ''),
+            # Servers with torrentAllowed=false kill the whole session when
+            # any LAN device torrents (disconnect reason TORRENT).
+            'torrentAllowed': server.get('torrentAllowed'),
             'publicIp': public_ip,
             'bondingMode': settings.get('bondingMode', '') if isinstance(settings, dict) else '',
             'encrypted': settings.get('encrypted', False) if isinstance(settings, dict) else False,
@@ -171,24 +204,28 @@ def disconnect():
 
 @app.route('/api/server', methods=['POST'])
 def change_server():
-    """Change Speedify server/country"""
+    """Change Speedify server.
+
+    Body: {"target": "p2p" | "closest" | "<cc>" | "<server-tag>"}
+    (legacy {"country": "<cc>"} still accepted).
+    """
     try:
-        data = request.get_json()
-        
-        if not data or 'country' not in data:
+        data = request.get_json(silent=True) or {}
+        target = str(data.get('target') or data.get('country') or '').strip().lower()
+
+        if not (target in CONNECT_KEYWORDS or COUNTRY_RE.match(target)
+                or SERVER_TAG_RE.match(target)):
             return jsonify({
                 'success': False,
-                'error': 'Country code is required'
+                'error': 'target must be p2p, closest, a 2-letter country code or a server tag'
             }), 400
-        
-        country = data['country'].lower()  # Speedify expects lowercase country codes
-        
-        # Change server using speedify API - connect_country expects just the country code
-        result = speedify.connect_country(country)
-        
+
+        result = speedify.connect(target)
+        name = result.get('friendlyName') if isinstance(result, dict) else None
+
         return jsonify({
             'success': True,
-            'message': f'Server changed to {country.upper()}',
+            'message': f'Connected to {name or target}',
             'data': result
         })
     except Exception as e:
@@ -442,6 +479,128 @@ def get_stats():
         }), 500
 
 
+def _fetch_sessions(since):
+    """Sessions overlapping [since, now], plus the one before (to know why
+    the window may start inside an outage). Ordered by start time."""
+    conn = sqlite3.connect(SPEEDIFY_DB_URI, uri=True, timeout=3)
+    try:
+        return conn.execute(
+            """
+            SELECT session_start, session_end, session_length,
+                   disconnect_reason, server, bytes_recv, bytes_sent
+            FROM sessions
+            WHERE session_start >= COALESCE(
+                (SELECT MAX(session_start) FROM sessions WHERE session_start < ?), 0)
+            ORDER BY session_start
+            """,
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+@app.route('/api/history')
+def get_history():
+    """Tunnel up/down timeline from Speedify's session DB.
+
+    While the tunnel is down every LAN client is offline, so the gaps
+    between sessions are the household's outages. Each gap is attributed
+    to the disconnect reason of the session that ended it.
+    """
+    try:
+        try:
+            hours = int(request.args.get('hours', 24))
+        except ValueError:
+            hours = 24
+        hours = max(1, min(hours, 24 * 31))
+
+        now = int(time.time())
+        since = now - hours * 3600
+        rows = _fetch_sessions(since)
+
+        try:
+            state = speedify.show_state()
+            connected = getattr(state, 'name', '') == 'CONNECTED'
+        except Exception:
+            connected = False
+
+        try:
+            last_reason = speedify._run_speedify_cmd(['show', 'disconnect']).get('disconnectReason')
+        except Exception:
+            last_reason = None
+
+        sessions = []
+        for i, (start, end, length, reason, server, b_in, b_out) in enumerate(rows):
+            end = end or (start + (length or 0))
+            is_last = i == len(rows) - 1
+            # The row of the running session has no reason yet and is only
+            # refreshed about once a minute; treat it as live up to now.
+            ongoing = is_last and connected and reason is None
+            if ongoing:
+                end = now
+            sessions.append({
+                'start': start, 'end': max(end, start),
+                'reason': None if ongoing else (reason or 'UNKNOWN'),
+                'server': server or '', 'bytesRecv': b_in or 0, 'bytesSent': b_out or 0,
+                'ongoing': ongoing,
+            })
+
+        # Build up/down segments clipped to the window
+        segments = []
+
+        def add(seg_type, start, end, **extra):
+            start, end = max(start, since), min(end, now)
+            if end > start:
+                segments.append({'type': seg_type, 'start': start, 'end': end, **extra})
+
+        for i, s in enumerate(sessions):
+            add('up', s['start'], s['end'], server=s['server'], endReason=s['reason'],
+                ongoing=s['ongoing'], bytesRecv=s['bytesRecv'], bytesSent=s['bytesSent'],
+                sessionStart=s['start'])
+            if s['ongoing']:
+                continue
+            next_start = sessions[i + 1]['start'] if i + 1 < len(sessions) else now
+            add('down', s['end'], next_start, cause=s['reason'], server=s['server'],
+                ongoing=i + 1 == len(sessions))
+        if not sessions:
+            add('down', since, now, cause=last_reason or 'UNKNOWN', server='', ongoing=True)
+
+        up = sum(g['end'] - g['start'] for g in segments if g['type'] == 'up')
+        down = sum(g['end'] - g['start'] for g in segments if g['type'] == 'down')
+        outages = [g for g in segments if g['type'] == 'down']
+        cuts = {}
+        for s in sessions:
+            if s['reason'] and since <= s['end'] <= now:
+                cuts[s['reason']] = cuts.get(s['reason'], 0) + 1
+        longest = max(outages, key=lambda g: g['end'] - g['start'], default=None)
+
+        return jsonify({
+            'success': True,
+            'data': {
+                'since': since,
+                'now': now,
+                'hours': hours,
+                'connected': connected,
+                'lastDisconnectReason': last_reason,
+                'segments': segments,
+                'summary': {
+                    'upSeconds': up,
+                    'downSeconds': down,
+                    'availability': (up / (up + down)) if (up + down) else None,
+                    'outageCount': sum(1 for g in outages if g['end'] - g['start'] >= 60),
+                    'cuts': cuts,
+                    'longestOutage': longest,
+                },
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
 @app.errorhandler(403)
 def forbidden(e):
     """Handle forbidden access"""
@@ -467,8 +626,8 @@ if __name__ == '__main__':
     debug_mode = '--dev' in sys.argv
     
     print(f"🚀 Starting Speedify Dashboard on port {PORT}")
-    print(f"🔒 Access restricted to 192.168.0.0/16")
-    print(f"📡 Dashboard available at http://192.168.x.x:{PORT}")
+    print(f"🔒 Access restricted to {ALLOWED_NETWORKS_LABEL} (+ loopback)")
+    print(f"📡 Dashboard available at http://pi3.local:{PORT}")
     
     if debug_mode:
         print("🔧 Development mode: Auto-reload enabled")

@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Speedify Dashboard</title>
 
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind CSS: prebuilt and served locally, so the page still renders
+         when the tunnel is down and LAN clients have no internet.
+         Rebuild after changing classes: ./scripts/build-css.sh -->
+    <link rel="stylesheet" href="/static/css/tailwind.css">
 
     <!-- Custom CSS -->
     <link rel="stylesheet" href="/static/css/custom.css">
@@ -50,11 +52,15 @@
                               class="hidden items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium bg-blue-500/10 border border-blue-500/30 text-blue-300">
                             🔒 Encrypted
                         </span>
+                        <span id="sessionInfo" class="text-sm text-gray-400"></span>
                     </div>
                     <div class="flex flex-wrap items-center gap-6">
                         <div>
                             <div class="text-xs text-gray-500 uppercase tracking-wide mb-0.5">Server</div>
-                            <span id="currentServer" class="font-medium text-gray-200">—</span>
+                            <div class="flex items-center gap-2">
+                                <span id="currentServer" class="font-medium text-gray-200">—</span>
+                                <span id="p2pBadge" class="hidden"></span>
+                            </div>
                         </div>
                         <div>
                             <div class="text-xs text-gray-500 uppercase tracking-wide mb-0.5">Public IP</div>
@@ -64,6 +70,52 @@
                                         class="text-gray-500 hover:text-gray-200 text-sm leading-none transition">📋</button>
                             </div>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Connection History (Speedify session DB) -->
+        <section class="mb-6">
+            <div class="bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-700">
+                <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <h2 class="text-xl font-semibold text-blue-300">Connection History</h2>
+                    <div class="inline-flex rounded-lg border border-gray-700 overflow-hidden text-sm" role="group">
+                        <button data-hours="24" class="history-range px-3 py-1">24 h</button>
+                        <button data-hours="168" class="history-range px-3 py-1 border-l border-gray-700">7 days</button>
+                        <button data-hours="720" class="history-range px-3 py-1 border-l border-gray-700">30 days</button>
+                    </div>
+                </div>
+
+                <!-- Headline numbers -->
+                <div id="historySummary" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                    <div class="text-gray-500 text-sm">Loading history…</div>
+                </div>
+
+                <!-- Timeline strip: green = tunnel up, coloured gaps = outages -->
+                <div id="historyStrip" class="relative h-7 rounded-md bg-gray-900 overflow-hidden"></div>
+                <div id="historyAxis" class="relative h-4 mt-1 text-[10px] text-gray-500 tabular-nums"></div>
+                <div id="historyLegend" class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-gray-400"></div>
+
+                <!-- Outage list -->
+                <div class="mt-5">
+                    <h3 class="text-sm font-semibold text-gray-300 mb-2">
+                        Outages <span id="outageCount" class="font-normal text-gray-500"></span>
+                    </h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead>
+                                <tr class="border-b border-gray-700 text-gray-400">
+                                    <th class="pb-2 font-medium">When</th>
+                                    <th class="pb-2 font-medium">Offline</th>
+                                    <th class="pb-2 font-medium">Cause</th>
+                                    <th class="pb-2 font-medium">Server</th>
+                                </tr>
+                            </thead>
+                            <tbody id="outageTable">
+                                <tr><td colspan="4" class="py-3 text-gray-500">Loading…</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -88,15 +140,27 @@
 
                     <!-- Server Selection -->
                     <div class="flex gap-2">
-                        <select id="countrySelect"
-                                class="flex-1 bg-gray-700 border border-gray-600 text-white py-3 px-4 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="">Select Country...</option>
+                        <select id="serverSelect"
+                                class="flex-1 min-w-0 bg-gray-700 border border-gray-600 text-white py-3 px-4 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">Select server…</option>
                         </select>
                         <button id="changeServerBtn"
                                 class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
                             Change Server
                         </button>
                     </div>
+                </div>
+
+                <!-- Torrent-safe shortcut -->
+                <div class="mt-4 flex flex-wrap items-center gap-3">
+                    <button id="p2pServerBtn"
+                            class="bg-emerald-700 hover:bg-emerald-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
+                        🧲 Switch to a torrent-safe server
+                    </button>
+                    <p class="text-xs text-gray-500 max-w-xl">
+                        Servers that ban P2P cut the tunnel for the <em>whole house</em> as soon as any device torrents.
+                        This connects to the closest server that allows it (<span id="p2pServerCount">only a few, all in NL</span>).
+                    </p>
                 </div>
 
                 <!-- Status Messages -->
@@ -257,7 +321,7 @@
 
         <!-- Footer -->
         <footer class="text-center text-gray-600 text-sm mt-8">
-            <p>Speedify Web Dashboard · pi3.local · LAN only (192.168.0.0/16)</p>
+            <p>Speedify Web Dashboard · pi3.local · LAN only (192.168.145.0/24, 192.168.146.0/24)</p>
         </footer>
     </div>
 
