@@ -14,6 +14,8 @@ import time
 import speedify
 import traceback
 
+import lanflows
+
 app = Flask(__name__)
 
 # Configuration
@@ -45,6 +47,15 @@ CSRF_VALUE = 'speedify-webui'
 # Speedify's own session history (world-readable, WAL mode). mode=ro
 # reads the WAL too, so the current session is included.
 SPEEDIFY_DB_URI = 'file:/usr/share/speedify/logs/sql.db?mode=ro'
+
+# Runtime data written by the dashboard (gitignored): TORRENT-kick snapshots
+# and user-given device names.
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+
+# Per-device traffic sampler (conntrack via `sudo -n lan-flows`); started in
+# __main__ so the debug reloader's parent process doesn't run a second one.
+lan_sampler = lanflows.LanSampler(DATA_DIR, SPEEDIFY_DB_URI)
+DEVICE_LABEL_MAX = 40
 
 # Valid targets for `speedify_cli connect`: keywords, a 2-letter country
 # code, or a server tag such as "nl-amsterdam-5".
@@ -575,6 +586,20 @@ def get_history():
                 cuts[s['reason']] = cuts.get(s['reason'], 0) + 1
         longest = max(outages, key=lambda g: g['end'] - g['start'], default=None)
 
+        # Who was active when the server cut us for TORRENT (snapshots are
+        # saved by the LAN sampler; the outage starts at the kick time)
+        try:
+            incidents = lan_sampler.incidents(since=since - 300, limit=500)
+        except Exception:
+            incidents = []
+        for g in outages:
+            if g['cause'] != 'TORRENT':
+                continue
+            match = next((i for i in incidents if abs(i['kickedAt'] - g['start']) <= 120), None)
+            if match:
+                g['suspects'] = match['suspects'][:3]
+                g['snapshotSamples'] = match['samples']
+
         return jsonify({
             'success': True,
             'data': {
@@ -720,6 +745,43 @@ def get_usage():
         }), 500
 
 
+@app.route('/api/devices')
+def get_devices():
+    """Per-device internet traffic (latest conntrack sample) + recent
+    TORRENT-kick snapshots."""
+    try:
+        data = lan_sampler.current()
+        data['incidents'] = lan_sampler.incidents(since=int(time.time()) - 30 * 86400, limit=20)
+        return jsonify({'success': True, 'data': data})
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
+@app.route('/api/devices/label', methods=['POST'])
+def set_device_label():
+    """Name a device. Body: {"mac": "aa:bb:...", "label": "Souad's Mac"}
+    (empty label removes it). Keyed by MAC: IPs change, MACs don't (phones
+    keep one private MAC per Wi-Fi network)."""
+    data = request.get_json(silent=True) or {}
+    mac = str(data.get('mac') or '').strip().lower()
+    label = ' '.join(str(data.get('label') or '').split())[:DEVICE_LABEL_MAX]
+    if not lanflows.MAC_RE.match(mac):
+        return jsonify({'success': False, 'error': 'Invalid MAC address'}), 400
+    try:
+        lan_sampler.labels.set(mac, label)
+        return jsonify({'success': True, 'message': f'Saved name for {mac}' if label else f'Removed name for {mac}'})
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
 @app.errorhandler(403)
 def forbidden(e):
     """Handle forbidden access"""
@@ -750,6 +812,11 @@ if __name__ == '__main__':
     
     if debug_mode:
         print("🔧 Development mode: Auto-reload enabled")
+
+    # With the reloader, only the child process (WERKZEUG_RUN_MAIN) serves
+    if not debug_mode or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        lan_sampler.start()
+        print(f"🔎 Per-device sampler every {lanflows.SAMPLE_INTERVAL}s (sudo -n /usr/local/bin/lan-flows)")
     
     app.run(
         host='0.0.0.0',

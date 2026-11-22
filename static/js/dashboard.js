@@ -21,10 +21,13 @@ let historyHours = parseInt(localStorage.getItem('historyHours'), 10) || 24;
 let historyData = null;           // last /api/history payload
 let historyLoadedAt = 0;          // history is polled every 60 s, not every refresh
 let usageLoadedAt = 0;            // data budgets: polled every 60 s
+let devicesLoadedAt = 0;          // per-device traffic: server samples every 30 s
+let devicesData = null;
 
 const SERVERS_TTL_MS = 10 * 60 * 1000;
 const HISTORY_TTL_MS = 60 * 1000;
 const USAGE_TTL_MS = 60 * 1000;
+const DEVICES_TTL_MS = 15 * 1000;
 
 /**
  * fetch() wrapper that adds the anti-CSRF header the backend requires on
@@ -113,6 +116,12 @@ function setupEventListeners() {
     // One-click torrent-safe server (`speedify_cli connect p2p`)
     document.getElementById('p2pServerBtn').addEventListener('click', () => {
         changeServer('p2p', 'the closest torrent-safe server');
+    });
+    
+    // Device naming (pencil button in the Devices table)
+    document.getElementById('devicesTable').addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-mac]');
+        if (btn) renameDevice(btn.dataset.mac, btn.dataset.name, btn.dataset.label);
     });
     
     // History range toggle (24 h / 7 d / 30 d)
@@ -255,7 +264,8 @@ async function loadAllData() {
         loadPortBypasses(),
         loadStats(),
         loadHistory(),     // self-throttled (HISTORY_TTL_MS)
-        loadUsage()        // self-throttled (USAGE_TTL_MS)
+        loadUsage(),       // self-throttled (USAGE_TTL_MS)
+        loadDevices()      // self-throttled (DEVICES_TTL_MS)
     ]);
     updateLastUpdated(!!statusOk);
 }
@@ -845,7 +855,7 @@ async function changeServer(target, label) {
     }
     const name = label || target;
     // Every LAN client rides the tunnel: a switch drops the whole house
-    if (!confirm(`Switch to ${name}?\n\nInternet drops for everyone in the house for a few seconds.`)) {
+    if (!confirm(`Switch to ${name}?\n\nInternet drops for everyone in the house for a few seconds.${p2pRiskWarning(target)}`)) {
         return;
     }
 
@@ -1004,6 +1014,152 @@ async function removePortBypass(port) {
         showActionMessage('Error removing port bypass', 'error');
     }
 };
+
+/**
+ * Load per-device traffic (latest conntrack sample + TORRENT-kick snapshots)
+ */
+async function loadDevices(force) {
+    if (!force && Date.now() - devicesLoadedAt < DEVICES_TTL_MS) return;
+    devicesLoadedAt = Date.now();
+    try {
+        const response = await fetch('/api/devices');
+        const result = await response.json();
+        if (result.success && result.data) {
+            devicesData = result.data;
+            renderDevices(devicesData);
+        } else {
+            throw new Error(result.error || 'devices unavailable');
+        }
+    } catch (error) {
+        console.error('Error loading devices:', error);
+        devicesLoadedAt = Date.now() - DEVICES_TTL_MS + 10000;
+    }
+}
+
+function formatRate(bps) {
+    if (bps == null) return '—';
+    const bits = bps * 8;
+    if (bits < 1000) return '0';
+    if (bits < 1e6) return (bits / 1e3).toFixed(0) + ' kbps';
+    return (bits / 1e6).toFixed(bits < 1e7 ? 1 : 0) + ' Mbps';
+}
+
+function verdictPill(verdict) {
+    if (verdict === 'torrent') {
+        return '<span class="inline-flex px-2 py-0.5 rounded-full border text-xs font-medium bg-red-500/15 border-red-500/30 text-red-300" title="Connected to many different peers on non-standard ports, or to BitTorrent ports: looks like a torrent client.">torrent-like</span>';
+    }
+    if (verdict === 'elevated') {
+        return '<span class="inline-flex px-2 py-0.5 rounded-full border text-xs font-medium bg-amber-500/15 border-amber-500/30 text-amber-300" title="More peer-to-peer style connections than normal browsing or apps.">elevated</span>';
+    }
+    return '';
+}
+
+function deviceNameHtml(d) {
+    const sub = [];
+    if (d.ip) sub.push(d.ip);
+    if (d.label && d.hostname && d.hostname !== d.label) sub.push(d.hostname);
+    if (d.randomMac) sub.push('private MAC');
+    const edit = d.mac
+        ? `<button data-mac="${escapeHtml(d.mac)}" data-name="${escapeHtml(d.name)}" data-label="${escapeHtml(d.label || '')}" title="Name this device" class="ml-1 text-gray-500 hover:text-gray-200 text-xs">✏️</button>`
+        : '';
+    return `<div class="font-medium text-gray-200">${escapeHtml(d.name)}${edit}</div>
+        <div class="text-xs text-gray-500">${escapeHtml(sub.join(' · '))}</div>`;
+}
+
+function renderDevices(data) {
+    const tbody = document.getElementById('devicesTable');
+    const meta = document.getElementById('devicesMeta');
+    const idleEl = document.getElementById('devicesIdle');
+    if (!tbody) return;
+
+    if (!data.available) {
+        meta.textContent = '';
+        const why = data.error
+            ? `Cannot read the connection table: ${escapeHtml(data.error)}`
+            : 'Collecting the first sample…';
+        tbody.innerHTML = `<tr><td colspan="5" class="py-3 ${data.error ? 'text-red-300' : 'text-gray-500'}">${why}</td></tr>`;
+        idleEl.textContent = '';
+    } else {
+        const age = Math.max(0, Math.round(Date.now() / 1000 - data.sampledAt));
+        meta.textContent = `${data.flows} connections tracked · sampled ${age}s ago`;
+        if (data.devices.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="py-3 text-gray-500">No internet connections right now</td></tr>';
+        } else {
+            tbody.innerHTML = data.devices.map((d) => {
+                const peerClass = d.verdict === 'torrent' ? 'text-red-300 font-semibold'
+                    : d.verdict === 'elevated' ? 'text-amber-300 font-medium' : 'text-gray-300';
+                const peak = d.recentPeakP2p > d.p2pPeers
+                    ? ` <span class="text-xs text-gray-500" title="Highest in the last 5 minutes">(peak ${d.recentPeakP2p})</span>` : '';
+                const bt = d.btFlows ? ` <span class="text-xs text-red-300" title="Connections on BitTorrent ports (6881-6889, trackers, Transmission 51413)">· ${d.btFlows} on BT ports</span>` : '';
+                const services = (d.services || []).map(([name, n]) => `${escapeHtml(name)} ×${n}`).join(' · ');
+                return `<tr class="border-b border-gray-700/60 ${d.verdict === 'torrent' ? 'bg-red-500/5' : ''}">
+                    <td class="py-2 pr-3">${deviceNameHtml(d)}</td>
+                    <td class="py-2 pr-3 whitespace-nowrap tabular-nums">
+                        <span class="text-gray-200">↓ ${formatRate(d.rxBps)}</span>
+                        <span class="text-gray-500">↑ ${formatRate(d.txBps)}</span></td>
+                    <td class="py-2 pr-3 tabular-nums text-gray-300">${d.flows}
+                        <span class="text-xs text-gray-500">(${d.remotes} hosts)</span></td>
+                    <td class="py-2 pr-3 tabular-nums"><span class="${peerClass}">${d.p2pPeers}</span>${peak}${bt}
+                        ${verdictPill(d.verdict) ? ' ' + verdictPill(d.verdict) : ''}</td>
+                    <td class="py-2 text-xs text-gray-400">${services || '—'}</td>
+                </tr>`;
+            }).join('');
+        }
+        idleEl.textContent = data.idle && data.idle.length
+            ? 'Connected but idle: ' + data.idle.map((d) => d.name).join(', ')
+            : '';
+    }
+    renderIncidents(data.incidents || []);
+}
+
+function suspectLine(s) {
+    const bits = [];
+    if (s.peakBtFlows) bits.push(`${s.peakBtFlows} BT-port connections`);
+    bits.push(`${s.peakP2p} P2P-like peers`);
+    bits.push(formatBytes(s.bytes));
+    const hot = s.peakBtFlows > 0 || s.peakP2p >= 30;
+    return `<span class="${hot ? 'text-red-300 font-medium' : 'text-gray-300'}">${escapeHtml(s.name)}</span>
+        <span class="text-xs text-gray-500">${escapeHtml(bits.join(' · '))}</span>`;
+}
+
+function renderIncidents(incidents) {
+    const el = document.getElementById('incidentsList');
+    if (!el) return;
+    if (incidents.length === 0) {
+        el.innerHTML = '<div class="text-gray-500">No torrent cuts recorded since the sampler started. The next one will show up here with the devices that were active.</div>';
+        return;
+    }
+    el.innerHTML = incidents.map((i) => {
+        const lines = i.suspects.length
+            ? i.suspects.slice(0, 4).map((s) => `<div>${suspectLine(s)}</div>`).join('')
+            : '<div class="text-gray-500">No device activity captured (sampler was not running)</div>';
+        return `<div class="rounded-lg bg-gray-900/60 border border-gray-700 px-3 py-2">
+            <div class="text-xs text-gray-400 mb-1">${escapeHtml(formatWhen(i.kickedAt))} · <span class="font-mono">${escapeHtml(i.server)}</span> · ${i.samples} samples</div>
+            ${lines}
+        </div>`;
+    }).join('');
+}
+
+async function renameDevice(mac, name, current) {
+    const input = prompt(`Name for ${name} (${mac}).\nLeave empty to remove the name.`, current || '');
+    if (input === null) return;
+    try {
+        const response = await apiFetch('/api/devices/label', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mac, label: input })
+        });
+        const result = await response.json();
+        if (result.success) {
+            await Promise.all([loadDevices(true), loadHistory(true)]);
+        } else {
+            showActionMessage(`Could not save the name: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error saving device name:', error);
+        showActionMessage('Error saving the device name', 'error');
+    }
+}
 
 /**
  * Load per-adapter data budgets (usage vs Speedify caps + daily history)
@@ -1368,11 +1524,51 @@ function renderHistory(d) {
         return `<tr class="border-b border-gray-700/60${dim}">
             <td class="py-2 pr-3 whitespace-nowrap tabular-nums">${escapeHtml(formatWhen(g.start))}</td>
             <td class="py-2 pr-3 whitespace-nowrap tabular-nums ${dur >= 600 ? 'text-red-300 font-medium' : ''}">${formatDuration(dur)}${g.ongoing ? ' <span class="text-red-400">(ongoing)</span>' : ''}</td>
-            <td class="py-2 pr-3">${reasonPill(g.cause)} <span class="hidden md:inline text-xs text-gray-500">${escapeHtml(r.explain)}</span></td>
+            <td class="py-2 pr-3">${reasonPill(g.cause)} <span class="hidden md:inline text-xs text-gray-500">${escapeHtml(r.explain)}</span>${suspectsHtml(g)}</td>
             <td class="py-2 font-mono text-xs">${escapeHtml(g.server || '—')}</td>
         </tr>`;
     }).join('') + (rows.length > MAX_ROWS
         ? `<tr><td colspan="4" class="pt-2 text-xs text-gray-500">… and ${rows.length - MAX_ROWS} older</td></tr>` : '');
+}
+
+/**
+ * Does a `connect` target guarantee a P2P-allowed server? Specific tag:
+ * its torrentAllowed flag. Country: only if every server there allows it.
+ * closest/public/...: no guarantee.
+ */
+function targetAllowsP2p(target) {
+    if (target === 'p2p') return true;
+    const server = availableServers.find((s) => s.tag === target);
+    if (server) return !!server.torrentAllowed;
+    const inCountry = availableServers.filter((s) => String(s.country).toLowerCase() === target);
+    return inCountry.length > 0 && inCountry.every((s) => s.torrentAllowed);
+}
+
+/**
+ * Extra confirm() text when switching to a server that may ban P2P while a
+ * device (or pi3's Transmission) shows torrent-like traffic: that server
+ * would cut the tunnel for everyone within minutes.
+ */
+function p2pRiskWarning(target) {
+    if (targetAllowsP2p(target) || !devicesData || !devicesData.devices) return '';
+    const risky = devicesData.devices.filter((d) => d.verdict || d.btFlows > 0 || d.recentPeakP2p >= 30);
+    if (risky.length === 0) return '';
+    const names = risky.slice(0, 3).map((d) => d.name).join(', ');
+    return `\n\n⚠ ${names} ${risky.length === 1 ? 'has' : 'have'} torrent-like traffic right now. ` +
+        'This server may ban P2P: Speedify would then cut the tunnel for the whole house (usually within ~2 minutes). ' +
+        'Stop the torrents first, or pick a torrent-safe server.';
+}
+
+/**
+ * Top suspects saved by the LAN sampler for a TORRENT outage
+ */
+function suspectsHtml(g) {
+    if (g.cause !== 'TORRENT') return '';
+    if (!g.suspects || g.suspects.length === 0) {
+        return '<div class="text-xs text-gray-600 mt-0.5">no per-device snapshot (cut happened before sampling started)</div>';
+    }
+    return `<div class="text-xs mt-1"><span class="text-gray-500">Most active just before:</span> ` +
+        g.suspects.slice(0, 2).map(suspectLine).join(' <span class="text-gray-600">|</span> ') + '</div>';
 }
 
 /**

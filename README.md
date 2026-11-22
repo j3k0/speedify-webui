@@ -6,6 +6,8 @@ A modern, web-based dashboard for monitoring and controlling Speedify connection
 
 - **Real-time Monitoring**: Live connection status, speeds, and data usage
 - **Connection History**: 24 h / 7 d / 30 d up/down timeline built from Speedify's own session DB — every outage with its duration and plain-English cause (torrent cut, restart, lost connection…), availability %, longest outage
+- **Data Budgets**: per uplink, usage today and over 30 days against Speedify's caps, over-cap behaviour (throttle rate), 30-day daily chart and pace
+- **Devices**: per-device internet connections from pi3's conntrack table (the Deco is an access point, so each device has its own IP), with a torrent-like detector; when Speedify cuts the tunnel for TORRENT, the most active devices just before are saved and shown on that outage
 - **Connection Control**: Connect, disconnect, and change servers with one click
 - **Network Adapters**: View all network adapters and their status
 - **Server Selection**: Pick a specific server, the best one in a country, or the closest torrent-safe (P2P-allowed) server; the status card flags servers that ban P2P
@@ -99,6 +101,12 @@ By default, the dashboard only accepts connections from `192.168.145.0/24`, `192
 Environment="WEBUI_ALLOWED_NETWORKS=192.168.145.0/24,192.168.146.0/24,127.0.0.0/8,::1/128"
 ```
 
+### Per-device view (needs router support)
+
+The Devices section reads `sudo -n /usr/local/bin/lan-flows`, a root wrapper around `conntrack -L` installed together with a no-arguments sudo rule and the byte-counter sysctl by `~/Documents/pi3-router/scripts/deploy.sh`. Without it the section shows an error instead of data; everything else keeps working. A background thread samples every 30 s (15 min kept in memory); runtime data lives in `data/` (gitignored): `incidents.db` (suspects saved at each TORRENT cut) and `device-labels.json` (names, keyed by MAC).
+
+**Detector:** "P2P-like peers" = distinct remote hosts reached on non-standard ports (>= 1024 and not a known service); Tailscale/WireGuard are excluded by local port. Torrent-like: >= 30 such peers, or >= 12 plus connections on BitTorrent ports. Thresholds are in `lanflows.py`. Run the tests with `python3 -m unittest discover -s tests`.
+
 ### Styling (Tailwind)
 
 Tailwind is prebuilt into `static/css/tailwind.css` (committed) instead of loading the Play CDN, so the dashboard keeps its styling when the internet is down. After adding or changing Tailwind classes in `templates/` or `static/js/`, rebuild on a machine with Node and commit the result:
@@ -159,9 +167,12 @@ The dashboard exposes several REST API endpoints:
 | GET | `/api/adapters` | Network adapters |
 | GET | `/api/servers` | Available servers |
 | GET | `/api/stats` | Connection statistics |
+| GET | `/api/usage?days=30` | Per-adapter data usage vs caps + daily history |
+| GET | `/api/devices` | Per-device traffic (latest sample) + saved TORRENT-kick snapshots |
 | GET | `/api/history?hours=24` | Up/down segments, outages and disconnect reasons (1–744 h) from Speedify's session DB |
 | GET | `/api/bypasses` | Domain bypasses list |
 | GET | `/api/port-bypasses` | Port bypasses list |
+| POST | `/api/devices/label` | Name a device: JSON `{"mac": "aa:bb:..", "label": "..."}` (empty label removes it) |
 | POST | `/api/connect` | Connect to Speedify |
 | POST | `/api/disconnect` | Disconnect from Speedify |
 | POST | `/api/server` | Change server: JSON `{"target": "p2p" \| "closest" \| "<country code>" \| "<server tag>"}` |

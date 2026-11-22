@@ -30,3 +30,6 @@ Thumbs.db
 
 # Local agent notes
 AGENTS.md
+
+# Runtime data written by the dashboard (TORRENT snapshots, device names)
+data/

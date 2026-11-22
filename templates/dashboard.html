@@ -262,6 +262,45 @@
             </div>
         </section>
 
+        <!-- Devices (per-device internet traffic from pi3's conntrack table) -->
+        <section class="mb-6">
+            <div class="bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-700">
+                <div class="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+                    <h2 class="text-xl font-semibold text-blue-300">Devices</h2>
+                    <span id="devicesMeta" class="text-xs text-gray-500"></span>
+                </div>
+                <p class="text-xs text-gray-500 mb-4 max-w-3xl">
+                    Internet connections per device, read from pi3's connection table every 30 s.
+                    <span class="text-gray-400">P2P-like peers</span> = different hosts reached on non-standard ports:
+                    apps and browsers stay in single digits, torrent clients reach dozens to hundreds.
+                    Tailscale is excluded. Click ✏️ to name a device.
+                </p>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead>
+                            <tr class="border-b border-gray-700 text-gray-400">
+                                <th class="pb-2 font-medium">Device</th>
+                                <th class="pb-2 font-medium">↓ / ↑</th>
+                                <th class="pb-2 font-medium">Connections</th>
+                                <th class="pb-2 font-medium">P2P-like peers</th>
+                                <th class="pb-2 font-medium">Top services</th>
+                            </tr>
+                        </thead>
+                        <tbody id="devicesTable">
+                            <tr><td colspan="5" class="py-3 text-gray-500">Loading devices…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div id="devicesIdle" class="text-xs text-gray-500 mt-3"></div>
+
+                <div class="mt-6">
+                    <h3 class="text-sm font-semibold text-gray-300 mb-1">Torrent cuts: who was active</h3>
+                    <p class="text-xs text-gray-500 mb-3">When Speedify records a TORRENT cut, the 15 minutes of per-device samples before it are saved here.</p>
+                    <div id="incidentsList" class="space-y-2 text-sm"></div>
+                </div>
+            </div>
+        </section>
+
         <!-- Bypass Management -->
         <section class="mb-6">
             <div class="bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-700">
