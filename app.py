@@ -5,6 +5,7 @@ A Flask-based web interface for monitoring and controlling Speedify
 """
 
 from flask import Flask, render_template, jsonify, request, abort
+import datetime
 import ipaddress
 import os
 import re
@@ -592,6 +593,124 @@ def get_history():
                     'longestOutage': longest,
                 },
             }
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
+def _day_key(day):
+    """Speedify's intf_netw_stats.day encoding: (year-1900)*10000 + month*100
+    + day, e.g. 2026-11-22 -> 1261122 (local time)."""
+    return (day.year - 1900) * 10000 + day.month * 100 + day.day
+
+
+def _daily_usage(since_day):
+    """{adapterID: {day_key: bytes}} from Speedify's per-interface daily
+    usage. interface.guid holds the adapterID (interface.name is NULL)."""
+    conn = sqlite3.connect(SPEEDIFY_DB_URI, uri=True, timeout=3)
+    try:
+        rows = conn.execute(
+            """
+            SELECT i.guid, s.day, SUM(s.usage)
+            FROM intf_netw_stats s JOIN interface i ON i.id = s.interface_id
+            WHERE s.day >= ?
+            GROUP BY i.guid, s.day
+            """,
+            (_day_key(since_day),),
+        ).fetchall()
+    finally:
+        conn.close()
+    usage = {}
+    for guid, day, total in rows:
+        usage.setdefault(guid, {})[day] = total or 0
+    return usage
+
+
+@app.route('/api/usage')
+def get_usage():
+    """Per-adapter data budgets: usage vs Speedify's daily / monthly caps,
+    what happens over the cap, and daily usage history.
+
+    Caps are Speedify's own (`adapter datalimit ...`). Monthly reset day 0
+    means a rolling 30-day window. Over a cap, Speedify throttles the
+    adapter to overlimitRatelimit (bits/s), or stops using it if that is 0.
+    """
+    try:
+        try:
+            days = int(request.args.get('days', 30))
+        except ValueError:
+            days = 30
+        days = max(7, min(days, 90))
+
+        today = datetime.date.today()
+        day_list = [today - datetime.timedelta(days=i) for i in range(days - 1, -1, -1)]
+        history_db = _daily_usage(day_list[0])
+
+        adapters = speedify.show_adapters()
+        if isinstance(adapters, dict):
+            adapters = adapters.get('adapters', [])
+
+        result = []
+        for a in adapters or []:
+            adapter_id = a.get('adapterID') or a.get('name') or ''
+            du = a.get('dataUsage') or {}
+            used_today = du.get('usageDaily') or 0
+            daily_limit = du.get('usageDailyLimit') or 0
+            daily_boost = du.get('usageDailyBoost') or 0
+            daily_cap = daily_limit + daily_boost if daily_limit else 0
+            used_month = du.get('usageMonthly') or 0
+            monthly_cap = du.get('usageMonthlyLimit') or 0
+            reset_day = du.get('usageMonthlyResetDay') or 0
+
+            per_day = history_db.get(adapter_id, {})
+            history = []
+            for day in day_list:
+                used = per_day.get(_day_key(day), 0)
+                if day == today:
+                    # the DB row lags the live counter a little
+                    used = max(used, used_today)
+                history.append({'date': day.isoformat(), 'bytes': used})
+
+            # Average over the last 7 complete days (today is partial)
+            last7 = [h['bytes'] for h in history[-8:-1]]
+            avg7 = sum(last7) / len(last7) if last7 else 0
+
+            next_reset = None
+            if reset_day:
+                year, month = today.year, today.month
+                if today.day >= reset_day:
+                    month += 1
+                    if month > 12:
+                        year, month = year + 1, 1
+                # clamp to the month's length (e.g. reset day 31 in Feb)
+                last = (datetime.date(year + (month == 12), month % 12 + 1, 1)
+                        - datetime.timedelta(days=1)).day
+                next_reset = datetime.date(year, month, min(reset_day, last)).isoformat()
+
+            result.append({
+                'id': adapter_id,
+                'name': a.get('description') or adapter_id,
+                'isp': a.get('isp') or '',
+                'type': a.get('type') or '',
+                'state': a.get('state') or '',
+                'priority': a.get('workingPriority') or a.get('priority') or '',
+                'daily': {'used': used_today, 'cap': daily_cap, 'boost': daily_boost},
+                'monthly': {'used': used_month, 'cap': monthly_cap,
+                            'resetDay': reset_day, 'nextReset': next_reset},
+                'overDaily': bool(daily_cap) and used_today >= daily_cap,
+                'overMonthly': bool(monthly_cap) and used_month >= monthly_cap,
+                'overLimitRateBps': du.get('overlimitRatelimit') or 0,
+                'avg7': avg7,
+                'history': history,
+            })
+
+        return jsonify({
+            'success': True,
+            'data': {'days': days, 'today': today.isoformat(), 'adapters': result}
         })
     except Exception as e:
         return jsonify({

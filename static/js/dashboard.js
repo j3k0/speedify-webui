@@ -20,9 +20,11 @@ let serversLoadedAt = 0;          // servers list changes rarely; refresh every 
 let historyHours = parseInt(localStorage.getItem('historyHours'), 10) || 24;
 let historyData = null;           // last /api/history payload
 let historyLoadedAt = 0;          // history is polled every 60 s, not every refresh
+let usageLoadedAt = 0;            // data budgets: polled every 60 s
 
 const SERVERS_TTL_MS = 10 * 60 * 1000;
 const HISTORY_TTL_MS = 60 * 1000;
+const USAGE_TTL_MS = 60 * 1000;
 
 /**
  * fetch() wrapper that adds the anti-CSRF header the backend requires on
@@ -252,7 +254,8 @@ async function loadAllData() {
         loadBypasses(),
         loadPortBypasses(),
         loadStats(),
-        loadHistory()      // self-throttled (HISTORY_TTL_MS)
+        loadHistory(),     // self-throttled (HISTORY_TTL_MS)
+        loadUsage()        // self-throttled (USAGE_TTL_MS)
     ]);
     updateLastUpdated(!!statusOk);
 }
@@ -1001,6 +1004,154 @@ async function removePortBypass(port) {
         showActionMessage('Error removing port bypass', 'error');
     }
 };
+
+/**
+ * Load per-adapter data budgets (usage vs Speedify caps + daily history)
+ */
+async function loadUsage(force) {
+    if (!force && Date.now() - usageLoadedAt < USAGE_TTL_MS) return;
+    usageLoadedAt = Date.now();
+    try {
+        const response = await fetch('/api/usage?days=30');
+        const result = await response.json();
+        if (result.success && result.data) {
+            renderBudgets(result.data);
+        } else {
+            throw new Error(result.error || 'usage unavailable');
+        }
+    } catch (error) {
+        console.error('Error loading usage:', error);
+        usageLoadedAt = Date.now() - USAGE_TTL_MS + 15000;   // retry in 15 s
+    }
+}
+
+/**
+ * Usage bar coloured by how close it is to the cap
+ */
+function budgetBar(used, cap) {
+    if (!cap) {
+        return '<div class="h-2 rounded-full bg-gray-700"></div>';
+    }
+    const frac = used / cap;
+    const cls = frac >= 0.9 ? 'bg-red-500' : frac >= 0.7 ? 'bg-amber-500' : 'bg-green-500';
+    const pct = Math.min(100, Math.max(frac > 0 ? 2 : 0, frac * 100));
+    return `<div class="h-2 rounded-full bg-gray-700 overflow-hidden">
+        <div class="h-full rounded-full ${cls}" style="width:${pct.toFixed(1)}%"></div>
+    </div>`;
+}
+
+function budgetRow(label, used, cap, note) {
+    const capText = cap
+        ? `<span class="text-gray-500">/ ${formatBytes(cap)}</span> <span class="text-gray-400">(${Math.round((used / cap) * 100)}%)</span>`
+        : '<span class="text-gray-500">· no cap</span>';
+    return `<div>
+        <div class="flex items-baseline justify-between gap-2 text-sm mb-1">
+            <span class="text-gray-400">${label}${note ? ` <span class="text-xs text-gray-500">${note}</span>` : ''}</span>
+            <span class="tabular-nums"><span class="font-semibold text-gray-200">${formatBytes(used)}</span> ${capText}</span>
+        </div>
+        ${budgetBar(used, cap)}
+    </div>`;
+}
+
+/**
+ * 30-day daily usage bars (SVG) with the daily cap as a dashed line.
+ * Bars over the daily cap are red; today is highlighted.
+ */
+function usageChart(history, dailyCap) {
+    const n = history.length;
+    if (!n) return '';
+    const w = 300, h = 64, gap = 1.5;
+    const maxUsed = Math.max(...history.map((d) => d.bytes), 1);
+    const scale = Math.max(maxUsed, dailyCap ? dailyCap * 1.15 : 0);
+    const bw = w / n;
+    let bars = '';
+    history.forEach((d, i) => {
+        const bh = d.bytes > 0 ? Math.max(1, (d.bytes / scale) * (h - 2)) : 0;
+        const isToday = i === n - 1;
+        const over = dailyCap && d.bytes >= dailyCap;
+        const fill = over ? '#ef4444' : isToday ? '#60a5fa' : '#3b82f6';
+        const opacity = isToday ? 1 : 0.75;
+        const date = new Date(d.date + 'T00:00:00');
+        const label = `${date.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}: ${formatBytes(d.bytes)}${isToday ? ' (today so far)' : ''}`;
+        // full-height transparent hit area so tiny bars still get a tooltip
+        bars += `<g><title>${escapeHtml(label)}</title>
+            <rect x="${(i * bw).toFixed(2)}" y="0" width="${bw.toFixed(2)}" height="${h}" fill="transparent"/>
+            <rect x="${(i * bw + gap / 2).toFixed(2)}" y="${(h - bh).toFixed(2)}" width="${Math.max(0.5, bw - gap).toFixed(2)}" height="${bh.toFixed(2)}" rx="1" fill="${fill}" opacity="${opacity}"/></g>`;
+    });
+    let capLine = '';
+    if (dailyCap) {
+        const y = (h - (dailyCap / scale) * (h - 2)).toFixed(2);
+        capLine = `<line x1="0" x2="${w}" y1="${y}" y2="${y}" stroke="#f87171" stroke-width="1" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"><title>Daily cap ${escapeHtml(formatBytes(dailyCap))}</title></line>`;
+    }
+    const first = new Date(history[0].date + 'T00:00:00');
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="w-full h-16">${bars}${capLine}</svg>
+        <div class="flex justify-between text-[10px] text-gray-500 tabular-nums mt-0.5">
+            <span>${escapeHtml(first.toLocaleDateString([], { day: 'numeric', month: 'short' }))}</span>
+            <span>max ${escapeHtml(formatBytes(maxUsed))}/day</span>
+            <span>today</span>
+        </div>`;
+}
+
+function renderBudgets(data) {
+    const container = document.getElementById('budgetCards');
+    if (!container) return;
+    // Only real uplinks: skip adapters Speedify has never counted any data on
+    const adapters = (data.adapters || []).filter((a) =>
+        a.daily.cap || a.monthly.cap || a.monthly.used || a.history.some((d) => d.bytes > 0));
+    if (adapters.length === 0) {
+        container.innerHTML = '<div class="text-gray-500 text-sm">No adapter usage recorded</div>';
+        return;
+    }
+
+    container.innerHTML = adapters.map((a) => {
+        const rate = a.overLimitRateBps
+            ? `${(a.overLimitRateBps / 1e6).toFixed(a.overLimitRateBps % 1e6 ? 1 : 0)} Mbps` : null;
+        const capped = a.daily.cap || a.monthly.cap;
+        let overHtml = '';
+        if (a.overDaily || a.overMonthly) {
+            const which = a.overDaily && a.overMonthly ? 'daily and 30-day caps' : a.overDaily ? 'daily cap' : 'monthly cap';
+            overHtml = `<div class="mt-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-300">
+                ⚠ Over the ${which}: ${rate ? `throttled to ${rate}` : 'Speedify has stopped using this link'}</div>`;
+        } else if (capped) {
+            overHtml = `<div class="mt-3 text-xs text-gray-500">Over a cap, Speedify ${rate ? `throttles this link to ${rate}` : 'stops using this link'}.</div>`;
+        }
+
+        const m = a.monthly;
+        const monthLabel = m.resetDay ? 'This month' : 'Last 30 days';
+        const monthNote = m.resetDay
+            ? (m.nextReset ? `resets ${new Date(m.nextReset + 'T00:00:00').toLocaleDateString([], { day: 'numeric', month: 'short' })}` : '')
+            : 'rolling';
+        const boostNote = a.daily.boost ? `incl. ${formatBytes(a.daily.boost)} boost` : '';
+
+        // Pace: 7-day average vs the caps
+        let pace = `7-day average ${formatBytes(Math.round(a.avg7))}/day`;
+        if (a.daily.cap && a.avg7) pace += ` · ${Math.round((a.avg7 / a.daily.cap) * 100)}% of the daily cap`;
+        if (!m.resetDay && m.cap && a.avg7) {
+            const projected = a.avg7 * 30;
+            pace += ` · 30-day pace ${formatBytes(Math.round(projected))}`;
+            if (projected > m.cap) pace += ' <span class="text-amber-300">(over the cap)</span>';
+        }
+
+        const title = a.isp ? `${escapeHtml(a.name)} <span class="text-gray-400 font-normal">· ${escapeHtml(a.isp)}</span>` : escapeHtml(a.name);
+        return `<div class="rounded-lg bg-gray-900/60 border border-gray-700 p-4">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <div class="font-semibold text-gray-200">${title}
+                    <span class="ml-1 text-xs font-normal text-gray-500">${escapeHtml(a.type)}</span></div>
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="text-gray-500">priority ${escapeHtml(a.priority || '—')}</span>
+                    ${getAdapterStateHtml(a.state)}
+                </div>
+            </div>
+            <div class="space-y-3">
+                ${budgetRow('Today', a.daily.used, a.daily.cap, boostNote)}
+                ${budgetRow(monthLabel, m.used, m.cap, monthNote)}
+            </div>
+            <div class="mt-4">${usageChart(a.history, a.daily.cap)}</div>
+            <div class="mt-1 text-xs text-gray-500">${pace}</div>
+            ${overHtml}
+        </div>`;
+    }).join('');
+}
 
 /**
  * Disconnect reasons recorded by Speedify (sessions.disconnect_reason),
