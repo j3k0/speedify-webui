@@ -101,6 +101,17 @@ By default, the dashboard only accepts connections from `192.168.145.0/24`, `192
 Environment="WEBUI_ALLOWED_NETWORKS=192.168.145.0/24,192.168.146.0/24,127.0.0.0/8,::1/128"
 ```
 
+### Embedding (iframe) options
+
+Query parameters, applied before the first paint:
+
+| Parameter | Effect |
+|-----------|--------|
+| `?header=0` | Hides the title bar (also `false`, `no`, `off`, `hide`) |
+| `?bg=<color>` | Page background: hex with or without `#` (`1f2937`, `%23111827`), `transparent`, or a CSS colour name. Invalid values are ignored. Cards keep their own colour. |
+
+Example: `<iframe src="http://pi3.local:20333/?header=0&bg=0b1220">`
+
 ### Per-device view (needs router support)
 
 The Devices section reads `sudo -n /usr/local/bin/lan-flows`, a root wrapper around `conntrack -L` installed together with a no-arguments sudo rule and the byte-counter sysctl by `~/Documents/pi3-router/scripts/deploy.sh`. Without it the section shows an error instead of data; everything else keeps working. A background thread samples every 30 s (15 min kept in memory); runtime data lives in `data/` (gitignored): `incidents.db` (suspects saved at each TORRENT cut) and `device-labels.json` (names, keyed by MAC).

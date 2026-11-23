@@ -13,13 +13,33 @@
     <!-- Custom CSS -->
     <link rel="stylesheet" href="/static/css/custom.css">
 
+    <!-- Embedding options (e.g. in an iframe), applied before first paint:
+         ?header=0  hides the title bar
+         ?bg=<color> page background: 1f2937, %23111827, transparent, slategray... -->
+    <script>
+    (function () {
+        var q = new URLSearchParams(location.search);
+        var h = (q.get('header') || '').toLowerCase();
+        if (['0', 'false', 'no', 'off', 'hide'].indexOf(h) >= 0) {
+            document.documentElement.classList.add('no-header');
+        }
+        var bg = (q.get('bg') || '').trim();
+        if (/^[0-9a-f]{3,8}$/i.test(bg)) bg = '#' + bg;   // bare hex digits
+        if (bg && window.CSS && CSS.supports('color', bg)) {
+            var s = document.createElement('style');
+            s.textContent = 'body{background:' + bg + ' !important;background-image:none !important}';
+            document.head.appendChild(s);
+        }
+    })();
+    </script>
+
     <!-- Favicon -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20100%20100%22%3E%3Ctext%20y%3D%22.9em%22%20font-size%3D%2290%22%3E%F0%9F%9A%80%3C%2Ftext%3E%3C%2Fsvg%3E">
 </head>
 <body class="text-gray-100 min-h-screen">
     <div class="container mx-auto px-4 py-8 max-w-7xl">
         <!-- Header -->
-        <header class="mb-8 flex flex-wrap items-center justify-between gap-4">
+        <header id="pageHeader" class="mb-8 flex flex-wrap items-center justify-between gap-4">
             <div>
                 <h1 class="text-3xl md:text-4xl font-bold gradient-text"><span class="emoji">🚀</span> Speedify Dashboard</h1>
                 <p class="text-gray-400 mt-1 text-sm">pi3.local · monitor &amp; control your bonded uplinks</p>
@@ -70,52 +90,6 @@
                                         class="text-gray-500 hover:text-gray-200 text-sm leading-none transition">📋</button>
                             </div>
                         </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Connection History (Speedify session DB) -->
-        <section class="mb-6">
-            <div class="bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-700">
-                <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
-                    <h2 class="text-xl font-semibold text-blue-300">Connection History</h2>
-                    <div class="inline-flex rounded-lg border border-gray-700 overflow-hidden text-sm" role="group">
-                        <button data-hours="24" class="history-range px-3 py-1">24 h</button>
-                        <button data-hours="168" class="history-range px-3 py-1 border-l border-gray-700">7 days</button>
-                        <button data-hours="720" class="history-range px-3 py-1 border-l border-gray-700">30 days</button>
-                    </div>
-                </div>
-
-                <!-- Headline numbers -->
-                <div id="historySummary" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                    <div class="text-gray-500 text-sm">Loading history…</div>
-                </div>
-
-                <!-- Timeline strip: green = tunnel up, coloured gaps = outages -->
-                <div id="historyStrip" class="relative h-7 rounded-md bg-gray-900 overflow-hidden"></div>
-                <div id="historyAxis" class="relative h-4 mt-1 text-[10px] text-gray-500 tabular-nums"></div>
-                <div id="historyLegend" class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-gray-400"></div>
-
-                <!-- Outage list -->
-                <div class="mt-5">
-                    <h3 class="text-sm font-semibold text-gray-300 mb-2">
-                        Outages <span id="outageCount" class="font-normal text-gray-500"></span>
-                    </h3>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-left text-sm">
-                            <thead>
-                                <tr class="border-b border-gray-700 text-gray-400">
-                                    <th class="pb-2 font-medium">When</th>
-                                    <th class="pb-2 font-medium">Offline</th>
-                                    <th class="pb-2 font-medium">Cause</th>
-                                    <th class="pb-2 font-medium">Server</th>
-                                </tr>
-                            </thead>
-                            <tbody id="outageTable">
-                                <tr><td colspan="4" class="py-3 text-gray-500">Loading…</td></tr>
-                            </tbody>
-                        </table>
                     </div>
                 </div>
             </div>
@@ -218,6 +192,52 @@
                     <div class="text-3xl font-bold text-yellow-400 mt-2 tabular-nums" id="dataUploaded">0 B</div>
                     <div class="text-xs text-gray-500 mt-1 tabular-nums" id="dataUploadedSub">Last 30 days</div>
                     <svg id="upPeakSparkline" class="w-full h-5 mt-2.5" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+                </div>
+            </div>
+        </section>
+
+        <!-- Connection History (Speedify session DB) -->
+        <section class="mb-6">
+            <div class="bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-700">
+                <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <h2 class="text-xl font-semibold text-blue-300">Connection History</h2>
+                    <div class="inline-flex rounded-lg border border-gray-700 overflow-hidden text-sm" role="group">
+                        <button data-hours="24" class="history-range px-3 py-1">24 h</button>
+                        <button data-hours="168" class="history-range px-3 py-1 border-l border-gray-700">7 days</button>
+                        <button data-hours="720" class="history-range px-3 py-1 border-l border-gray-700">30 days</button>
+                    </div>
+                </div>
+
+                <!-- Headline numbers -->
+                <div id="historySummary" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                    <div class="text-gray-500 text-sm">Loading history…</div>
+                </div>
+
+                <!-- Timeline strip: green = tunnel up, coloured gaps = outages -->
+                <div id="historyStrip" class="relative h-7 rounded-md bg-gray-900 overflow-hidden"></div>
+                <div id="historyAxis" class="relative h-4 mt-1 text-[10px] text-gray-500 tabular-nums"></div>
+                <div id="historyLegend" class="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-gray-400"></div>
+
+                <!-- Outage list -->
+                <div class="mt-5">
+                    <h3 class="text-sm font-semibold text-gray-300 mb-2">
+                        Outages <span id="outageCount" class="font-normal text-gray-500"></span>
+                    </h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead>
+                                <tr class="border-b border-gray-700 text-gray-400">
+                                    <th class="pb-2 font-medium">When</th>
+                                    <th class="pb-2 font-medium">Offline</th>
+                                    <th class="pb-2 font-medium">Cause</th>
+                                    <th class="pb-2 font-medium">Server</th>
+                                </tr>
+                            </thead>
+                            <tbody id="outageTable">
+                                <tr><td colspan="4" class="py-3 text-gray-500">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </section>
